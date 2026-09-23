@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>观因 · DSH 工作空间</title><link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/app-overrides.css"><link rel="stylesheet" href="/lifecycle.css">
+</head>
+<body>
+  <main id="login" class="login-shell hidden">
+    <section class="brand-panel">
+      <div class="brand"><img src="/guanyin-logo.png" alt="观因"><span>观因</span></div>
+      <div class="brand-copy"><span class="eyebrow">GUANYIN AGENT PLATFORM</span><h1>让智能能力，安全地服务每一个团队。</h1><p>统一管理身份、租户与独立 DSH 工作空间。</p></div>
+      <div class="brand-foot">安全隔离 · 版本可控 · 简洁协作</div>
+    </section>
+    <section class="login-panel"><form id="login-form" class="login-card">
+      <div class="mobile-brand"><img src="/guanyin-logo.png" alt=""><span>观因</span></div>
+      <span class="eyebrow">欢迎回来</span><h2>登录工作空间</h2><p>使用管理员分配的账号继续。</p>
+      <label>用户名<input name="username" autocomplete="username" value="admin" required></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">登录</button><div id="login-error" class="error"></div>
+    </form></section>
+  </main>
+  <main id="app" class="app-shell hidden">
+    <aside><div class="brand nav-brand"><img src="/guanyin-logo.png" alt=""><span>观因</span></div>
+      <nav><button class="nav active" data-view="instances">我的工作空间</button><button class="nav admin-only" data-view="instance-admin">空间管理</button><button class="nav admin-only" data-view="users">用户与租户</button></nav>
+      <div class="user-block"><div class="avatar" id="avatar"></div><div><strong id="display-name"></strong><small id="tenant-name"></small></div><button id="logout" title="退出">↗</button></div>
+    </aside>
+    <section class="content"><header><div><span class="eyebrow">CONTROL CENTER</span><h1 id="page-title">我的工作空间</h1></div><span class="version">DSH 0.2.9-arm64</span></header>
+      <section id="instances-view" class="view"><div class="section-head"><div><h2>已授权空间</h2><p>这里显示您有权访问的个人或共享 DSH 空间。</p></div><button id="refresh">刷新状态</button></div><div id="instance-grid" class="instance-grid"></div></section>
+      <section id="instance-admin-view" class="view hidden"><div class="section-head"><div><h2>全部空间</h2><p>先创建空间，再配置成员、访问角色和休眠规则。</p></div><button id="admin-refresh">刷新状态</button></div><div id="admin-instance-grid" class="instance-grid"></div><div class="card table-card audit-card"><h3>管理员审计日志</h3><div id="audit-table"></div><div class="pager"><button id="admin-audit-prev" class="secondary">上一页</button><span id="admin-audit-page"></span><button id="admin-audit-next" class="secondary">下一页</button></div></div></section>
+      <section id="users-view" class="view hidden"><div class="tabs"><button class="tab active" data-tab="members">成员</button><button class="tab" data-tab="tenants">租户</button><button class="tab" data-tab="allocate">创建空间</button></div>
+        <div id="members-tab" class="tab-body"><div class="two-column"><form id="user-form" class="card"><h3>新建用户</h3><label>显示名称<input name="displayName" required></label><label>用户名<input name="username" required></label><label>初始密码<input name="password" type="password" minlength="8" required></label><label>所属租户<select name="tenantId" required></select></label><label>角色<select name="role"><option value="member">普通用户</option><option value="tenant_admin">租户管理员</option></select></label><button>创建用户</button><div class="form-message"></div></form><div class="card table-card"><h3>用户列表</h3><div id="user-table"></div></div></div></div>
+        <div id="tenants-tab" class="tab-body hidden"><div class="two-column"><form id="tenant-form" class="card"><h3>新建租户</h3><label>租户名称<input name="name" required></label><label>租户编码<input name="code" placeholder="例如 risk-team" required></label><button>创建租户</button><div class="form-message"></div></form><div class="card table-card"><h3>租户列表</h3><div id="tenant-table"></div></div></div></div>
+        <div id="allocate-tab" class="tab-body hidden"><form id="instance-form" class="card allocation"><h3>创建 DSH 空间</h3><p>空间创建后，再到“空间管理”绑定一个或多个成员。</p><label>空间名称<input name="name" placeholder="例如：运维场景分析" required></label><label>所属租户<select name="tenantId" required></select></label><label>休眠规则<select name="idleTimeoutMinutes"><option value="never">永不休眠</option><option value="30">空闲 30 分钟</option><option value="60" selected>空闲 1 小时</option><option value="120">空闲 2 小时</option><option value="240">空闲 4 小时</option><option value="480">空闲 8 小时</option></select></label><label>DSH 版本<select disabled><option>0.2.9-arm64</option></select></label><button>创建并启动</button><div class="form-message"></div></form></div>
+      </section>
+    </section>
+  </main>
+  <dialog id="edit-user-dialog" class="modal"><form id="edit-user-form" class="dialog-card">
+    <div class="dialog-head"><div><span class="eyebrow">用户管理</span><h2>编辑用户</h2><p id="edit-user-name"></p></div><button type="button" class="icon-close" data-close-dialog>×</button></div>
+    <label>显示名称<input name="displayName" required></label>
+    <label>所属租户<select name="tenantId" required></select></label>
+    <label>角色<select name="role"><option value="member">普通用户</option><option value="tenant_admin">租户管理员</option></select></label>
+    <label class="check-label"><input name="enabled" type="checkbox"><span>允许用户登录</span></label>
+    <div class="dialog-actions"><button type="button" class="secondary" data-close-dialog>取消</button><button type="submit">保存修改</button></div><div id="edit-user-message" class="form-message"></div>
+  </form></dialog>
+  <dialog id="user-audit-dialog" class="modal audit-dialog"><div class="dialog-card">
+    <div class="dialog-head"><div><span class="eyebrow">用户审计</span><h2 id="audit-user-name"></h2><p>仅记录操作元数据，不保存对话正文、密码、密钥或请求内容。</p></div><button type="button" class="icon-close" data-close-dialog>×</button></div>
+    <div id="user-audit-table" class="audit-list"></div>
+    <div class="pager"><button id="audit-prev" class="secondary">上一页</button><span id="audit-page"></span><button id="audit-next" class="secondary">下一页</button></div>
+  </div></dialog>
+  <dialog id="password-dialog" class="modal"><div class="dialog-card password-card">
+    <div class="dialog-head"><div><span class="eyebrow">密码初始化完成</span><h2 id="password-user-name"></h2><p>旧登录会话已全部注销。临时密码仅在这里展示一次。</p></div><button type="button" class="icon-close" data-close-dialog>×</button></div>
+    <code id="temporary-password"></code><div class="dialog-actions"><button id="copy-password">复制密码</button><button type="button" class="secondary" data-close-dialog>完成</button></div>
+  </div></dialog>
+  <dialog id="space-dialog" class="modal space-dialog"><div class="dialog-card">
+    <div class="dialog-head"><div><span class="eyebrow">空间管理</span><h2 id="space-dialog-name"></h2><p>配置空间休眠策略，并管理有权访问这个 Pod 的成员。</p></div><button type="button" class="icon-close" data-close-dialog>×</button></div>
+    <form id="space-settings-form" class="space-settings"><label>空间名称<input name="name" required></label><label>休眠规则<select name="idleTimeoutMinutes"></select></label><button type="submit">保存空间设置</button><p id="space-settings-message" class="save-message">修改休眠规则后请点击保存。</p></form>
+    <div class="member-manager"><h3>空间成员</h3><form id="space-member-form"><select name="userId" required></select><select name="accessRole"><option value="member">成员</option><option value="operator">运维者</option><option value="owner">负责人</option></select><button>添加或更新</button></form><div id="space-member-list"></div></div>
+  </div></dialog>
+  <script type="module" src="/app.js"></script>
+</body></html>

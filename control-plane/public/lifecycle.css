@@ -1,0 +1,8 @@
+.instance-card .sleep {
+  width: 100%;
+  margin-top: 8px;
+  color: #5f6965;
+  background: #f1f3f2;
+}
+.status.stopped { color: #5f6965; background: #edf0ee; }
+.status.stopping { color: #84671e; background: #faf5e6; }
