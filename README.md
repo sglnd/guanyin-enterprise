@@ -49,4 +49,4 @@ node --check public/app.js
 
 ## 生产部署
 
-当前 Kubernetes manifest 是本地参考环境。生产部署前需要配置私有镜像仓库、TLS、外部 Secret、CSI 存储、NetworkPolicy、集群外备份、监控告警和恢复演练。详见 [生产就绪清单](docs/production-readiness.md)。
+当前 Kubernetes manifest 是本地参考环境。详细的本地运行说明见 [本地部署与功能边界](docs/local-deployment.md)。生产部署前需要配置私有镜像仓库、TLS、外部 Secret、CSI 存储、NetworkPolicy、集群外备份、监控告警和恢复演练，详见 [生产就绪清单](docs/production-readiness.md)。
