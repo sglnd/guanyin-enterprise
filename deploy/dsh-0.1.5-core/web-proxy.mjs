@@ -1,10 +1,30 @@
 import http from 'node:http'
 import net from 'node:net'
 import { readFile } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 
 const upstreamHost = '127.0.0.1'
 const upstreamPort = 3081
+const brandLogoPath = '/opt/dsh-runtime/guanyin-logo.png'
+
+function verifyIdentity(req) {
+  const secret = process.env.DSH_EXT_TOKEN || ''
+  const [headerPart, payloadPart, actualPart, extra] = String(req.headers['x-guanyin-identity'] || '').split('.')
+  if (!secret || !headerPart || !payloadPart || !actualPart || extra) throw new Error('missing identity')
+  const input = `${headerPart}.${payloadPart}`
+  const actual = Buffer.from(actualPart)
+  const expected = Buffer.from(createHmac('sha256', secret).update(input).digest('base64url'))
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error('invalid identity')
+  const header = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8'))
+  const claims = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'))
+  const now = Math.floor(Date.now() / 1000)
+  if (header.alg !== 'HS256' || claims.iss !== 'guanyin-control-plane' || claims.aud !== 'guanyin-dsh' || claims.exp <= now || claims.iat > now + 5) throw new Error('expired identity')
+  return claims
+}
+
+function publicIdentity(claims) {
+  return { user: claims.user, tenant: claims.tenant, space: claims.space, impersonated: Boolean(claims.impersonated) }
+}
 
 async function token() {
   try { return (await readFile('/tmp/dsh-web-token', 'utf8')).trim() } catch { return '' }
@@ -108,6 +128,25 @@ async function handleGuanyinSessionRpc(req, res, method) {
 
 const server = http.createServer(async (req, res) => {
   let path = req.url || '/'
+  if (req.method === 'GET' && path === '/__guanyin/identity') {
+    try {
+      const body = JSON.stringify(publicIdentity(verifyIdentity(req)))
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' })
+      res.end(body)
+    } catch {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ error: 'Guanyin identity required' }))
+    }
+    return
+  }
+  if (req.method === 'GET' && (path === '/__guanyin/brand/logo.png' || path === '/__guanyin/brand/favicon.png')) {
+    try {
+      const body = await readFile(brandLogoPath)
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': body.length, 'cache-control': 'public, max-age=3600' })
+      res.end(body)
+    } catch { res.writeHead(404).end() }
+    return
+  }
   const internalMcp = path.match(/^\/__guanyin\/mcp-manager\/([A-Za-z0-9_$.-]+)$/)
   if (internalMcp) return handleGuanyinMcp(req, res, internalMcp[1])
   const internalSessionRpc = path.match(/^\/__guanyin\/dsh-rpc\/(session\/[A-Za-z0-9_$.-]+|skills\/[A-Za-z0-9_$.-]+)$/)
@@ -142,6 +181,7 @@ server.on('upgrade', async (req, socket, head) => {
   const internalStream = req.url === '/__guanyin/dsh-stream'
   if (internalStream && !isGuanyinRequest(req)) { socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n'); return }
   let cookie
+  try { if (!internalStream) verifyIdentity(req) } catch { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return }
   try { if (internalStream) cookie = await dshSessionCookie() } catch { socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n'); return }
   const upstream = net.connect(upstreamPort, upstreamHost, () => {
     const lines = [`${req.method} ${internalStream ? '/api/remote.mux' : req.url} HTTP/${req.httpVersion}`]

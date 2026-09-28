@@ -8,11 +8,12 @@ import * as store from './store.mjs'
 import { ApiRunWorker, createDshAdapter, isTerminalApiRun, validateApiInput } from './api-runner.mjs'
 import { generateApiDocumentation, normalizeApiManifest } from './api-contract.mjs'
 import { apiBuilderTools, executeApiBuilderTool, generateApiDraftWithAi } from './api-builder-mcp.mjs'
+import { createIdentityToken, withoutControlPlaneCookies, withoutInboundIdentityHeaders } from './guanyin-identity.mjs'
 
 const PORT = Number(process.env.PORT || 8080)
 const PUBLIC_DIR = process.env.PUBLIC_DIR || '/app/public'
 const NAMESPACE = process.env.DSH_NAMESPACE || 'guanyin-instances'
-const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/deepseek-harness-agent:0.1.5-rc.2-core-arm64'
+const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64'
 const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2'
 const PUBLIC_HOSTS = process.env.DSH_TRUSTED_HOSTS || 'localhost:18080,127.0.0.1:18080'
 const DSH_PERMISSION_MODE = process.env.DSH_PERMISSION_MODE || 'danger-full-access'
@@ -881,18 +882,23 @@ async function selectedInstance(req) {
   const instanceId = cookies(req).guanyin_instance
   if (!/^[0-9a-f-]{36}$/i.test(instanceId || '')) return undefined
   const owned = await store.instanceOwnedByUser(instanceId, user.id)
-  if (owned) return owned
-  if (user.role === 'platform_admin' && await store.hasAdminAccess(cookies(req).guanyin_session, instanceId)) return store.instanceById(instanceId)
+  if (owned) return { ...owned, impersonated: false }
+  if (user.role === 'platform_admin' && await store.hasAdminAccess(cookies(req).guanyin_session, instanceId)) {
+    const instance = await store.instanceById(instanceId)
+    return instance ? { ...instance, accessRole: 'platform_admin', impersonated: true } : undefined
+  }
   return undefined
 }
 
-function proxyHttp(req, res, instance, user) {
+async function proxyHttp(req, res, instance, user) {
   markInstanceActive(instance.id)
   const startedAt = Date.now()
   // DSH validates Origin against Host for its privileged /api RPC methods.
   // Preserve the browser-facing authority so settings, models and image-baked
   // management plugins keep the same-origin identity seen by the browser.
-  const upstream = http.request({ hostname: `dsh-${instance.slug}.${NAMESPACE}.svc.cluster.local`, port: 3080, path: req.url, method: req.method, headers: { ...req.headers, host: req.headers.host || PUBLIC_HOSTS.split(',')[0], 'x-guanyin-user': user.id, 'x-guanyin-instance': instance.id } }, upstreamRes => {
+  const identity = createIdentityToken({ user, instance, impersonated: instance.impersonated }, await instanceExtensionToken(instance))
+  const headers = { ...withoutControlPlaneCookies(withoutInboundIdentityHeaders(req.headers)), host: req.headers.host || PUBLIC_HOSTS.split(',')[0], 'x-guanyin-identity': identity }
+  const upstream = http.request({ hostname: `dsh-${instance.slug}.${NAMESPACE}.svc.cluster.local`, port: 3080, path: req.url, method: req.method, headers }, upstreamRes => {
     if (req.method === 'POST') {
       const rpcPath = new URL(req.url, 'http://localhost').pathname.slice(0, 200)
       audit({ actorUserId: user.id, action: 'dsh_operation', targetInstanceId: instance.id, targetUserId: user.id, details: { method: req.method, path: rpcPath, status: upstreamRes.statusCode, durationMs: Date.now() - startedAt, ip: clientIp(req) } })
@@ -939,9 +945,14 @@ const server = http.createServer(async (req, res) => {
 server.on('upgrade', async (req, socket, head) => {
   const instance = await selectedInstance(req)
   if (!instance) return socket.destroy()
+  const user = await currentUser(req)
+  if (!user) return socket.destroy()
   markInstanceActive(instance.id)
+  let identity
+  try { identity = createIdentityToken({ user, instance, impersonated: instance.impersonated }, await instanceExtensionToken(instance)) }
+  catch { return socket.destroy() }
   const upstream = net.connect(3080, `dsh-${instance.slug}.${NAMESPACE}.svc.cluster.local`, () => {
-    const headers = Object.entries(req.headers).map(([key, value]) => `${key}: ${value}`).join('\r\n')
+    const headers = Object.entries({ ...withoutControlPlaneCookies(withoutInboundIdentityHeaders(req.headers)), 'x-guanyin-identity': identity }).map(([key, value]) => `${key}: ${value}`).join('\r\n')
     upstream.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n${headers}\r\n\r\n`)
     if (head.length) upstream.write(head)
     socket.pipe(upstream).pipe(socket)

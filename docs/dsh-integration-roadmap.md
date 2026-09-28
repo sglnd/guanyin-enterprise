@@ -11,28 +11,28 @@
 建议首个派生镜像：
 
 ```text
-bankops/guanyin-dsh:0.1.7-alpha.2-gy.1-arm64
+bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64
 ```
 
 ## 第一阶段：观因身份插件
 
-- [ ] 开发 `guanyin-identity` DSH 插件。
-- [ ] 观因签发短期身份 JWT，不向 DSH 转发观因登录 Cookie 或第三方凭证。
-- [ ] 身份包含用户、租户、空间、空间角色和管理员代入状态。
-- [ ] DSH 验证签名、有效期、受众和空间 ID。
-- [ ] 提供 `/api/guanyin/identity` 接口。
-- [ ] 在 DSH 顶栏显示登录人、租户、空间角色和管理员代入状态。
-- [ ] HTTP、SSE 和 WebSocket 使用一致的身份传递机制。
-- [ ] 外部请求携带的身份 Header 必须由观因网关删除并重新生成。
+- [x] 在集中维护的 `@guanyin/dsh-ui-policy` 中实现身份展示层。
+- [x] 观因签发 60 秒短期身份 JWT，不向 DSH 转发观因登录 Cookie或第三方凭证。
+- [x] 身份包含用户、租户、空间、空间角色和管理员代入状态。
+- [x] DSH 边车验证 HMAC 签名、有效期、签发方和受众。
+- [x] 提供同源 `/__guanyin/identity` 接口，仅返回安全展示字段。
+- [x] 在 DSH 顶栏显示登录人、租户、空间角色和管理员代入状态。
+- [x] HTTP 与 WebSocket 由同一网关签发机制注入身份；内部 API Run 通道继续使用空间服务身份。
+- [x] 外部请求携带的身份 Header 由观因网关删除并重新生成。
 
 ## 第二阶段：观因品牌插件
 
-- [ ] 开发 `guanyin-branding` DSH 插件。
-- [ ] 替换用户可见的 DeepSeek Harness / DSH 产品名称和 Logo。
-- [ ] 替换浏览器标题、favicon、欢迎页、空状态、加载页和错误页。
-- [ ] 普通用户界面隐藏底层 DSH Core 版本；管理员仍可查询真实版本。
-- [ ] 保留发行物中的 MIT 许可证与第三方软件声明。
-- [ ] 避免修改 `@deepseek-ai/*` 内部包名和协议名称，减少对上游源码的侵入。
+- [x] 在 `@guanyin/dsh-ui-policy` 中实现品牌层，避免再增加分散插件。
+- [x] 替换用户可见的 DeepSeek Harness / DSH 产品名称并使用观因 Logo。
+- [x] 替换浏览器标题、favicon，并为 DSH 页面增加统一观因顶栏。
+- [x] 普通用户界面隐藏底层 DSH Core 品牌；真实版本仍保留在镜像标签和平台管理数据中。
+- [x] 保留发行物中的 MIT 许可证与第三方软件声明。
+- [x] 不修改 `@deepseek-ai/*` 内部包名和协议名称，减少对上游源码的侵入。
 
 ## 第三阶段：统一 UI 设计体系
 

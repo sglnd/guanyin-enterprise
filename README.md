@@ -22,13 +22,13 @@ docs/                生产就绪与运维文档
 
 ## 本地构建与部署
 
-当前本机示例使用 ARM64 DSH 镜像 `bankops/deepseek-harness-agent:0.1.5-rc.2-core-arm64`。
+当前本机示例使用基于 DSH `0.1.5-rc.2` 的观因 ARM64 工作空间镜像 `bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64`。
 
 ```bash
-docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.5.4 .
-docker save guanyin/control-plane:0.5.4 |
+docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.7.0 .
+docker save guanyin/control-plane:0.7.0 |
   docker exec -i desktop-control-plane ctr -n k8s.io images import -
-docker save bankops/deepseek-harness-agent:0.1.5-rc.2-core-arm64 |
+docker save bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64 |
   docker exec -i desktop-control-plane ctr -n k8s.io images import -
 
 kubectl apply -f deploy/kubernetes.yaml

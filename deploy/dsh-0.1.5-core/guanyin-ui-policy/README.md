@@ -4,7 +4,7 @@
 
 ## 文件职责
 
-- `lib/client.js`：运行时界面规则，包括隐藏 Codex UI 扩展管理、专家、技能、插件、连接器、IM 助理、配套管理模块，以及设置页中的 GitHub、npm、问题反馈、检查更新和平台托管页面入口。
+- `lib/client.js`：运行时界面规则，包括观因品牌、统一顶栏、登录人信息，以及隐藏 Codex UI 扩展管理、专家、技能、插件、连接器、IM 助理、配套管理模块和外部操作入口。
 - `build-policy.json`：构建期界面发布规则。`hostOnlyPackages` 中的插件只加载 DSH 宿主能力，不向浏览器发布自己的管理页面。
 - `cordis.patch.yml`：把 UI Policy 客户端加载到 Web profile。
 - `package.json`：UI Policy 插件声明。
@@ -15,6 +15,7 @@
 2. Codex UI 不显示扩展管理及其专家、技能、插件、连接器和 IM 助理入口。
 3. 插件设置页不显示 GitHub、npm、问题反馈和检查更新等外部操作。
 4. 品牌文案、Logo、浏览器图标等后续 DSH 侧改造也应加入本目录，不直接散写到 `Dockerfile` 或控制平面。
+5. 登录身份从同源 `/__guanyin/identity` 读取。该接口只接受控制平面用空间密钥签发的短期身份，不读取或暴露观因登录 Cookie。
 
 ## 适配新 DSH 版本
 

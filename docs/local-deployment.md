@@ -1,6 +1,6 @@
 # 观因本地部署与功能边界
 
-第一版聚焦完整主流程：平台管理员创建租户和用户、给用户分配固定版本的 DSH 实例、用户登录后进入自己的实例。本机 ARM 环境的新空间默认使用镜像 `bankops/deepseek-harness-agent:0.1.5-rc.2-core-arm64`，现有空间保持其创建时锁定的镜像版本。
+第一版聚焦完整主流程：平台管理员创建租户和用户、给用户分配固定版本的 DSH 实例、用户登录后进入自己的实例。本机 ARM 环境的新空间默认使用镜像 `bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64`，包含观因品牌与短期登录身份集成；现有空间保持其创建时锁定的镜像版本。
 
 该核心镜像包含 `dsh-better-sidebar 0.18.0`，不包含 Univer Office 和 Browser Use 插件，不开放 Univer 的 `9081` 端口；文档读取使用镜像内的 Python 文档解析运行时。
 
@@ -18,9 +18,9 @@
 ## 本地部署
 
 ```bash
-docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.5.4 .
-docker save guanyin/control-plane:0.5.4 | docker exec -i desktop-control-plane ctr -n k8s.io images import -
-docker save bankops/deepseek-harness-agent:0.1.5-rc.2-core-arm64 | docker exec -i desktop-control-plane ctr -n k8s.io images import -
+docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.7.0 .
+docker save guanyin/control-plane:0.7.0 | docker exec -i desktop-control-plane ctr -n k8s.io images import -
+docker save bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64 | docker exec -i desktop-control-plane ctr -n k8s.io images import -
 kubectl apply -f deploy/kubernetes.yaml
 kubectl -n guanyin-system rollout status statefulset/guanyin-postgres
 kubectl -n guanyin-system rollout status deployment/guanyin-control-plane
