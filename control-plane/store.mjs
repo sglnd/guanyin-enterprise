@@ -4,7 +4,7 @@ import pg from 'pg'
 const { Pool } = pg
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: Number(process.env.DB_POOL_SIZE || 10) })
 
-const userColumns = `u.id, u.username, u.display_name AS "displayName", u.role,
+const userColumns = `u.id, u.username, u.display_name AS "displayName", u.role, u.mcp_admin AS "mcpAdmin", u.api_admin AS "apiAdmin",
   u.tenant_id AS "tenantId", u.password_hash AS "passwordHash", u.enabled,
   u.created_at AS "createdAt", t.name AS "tenantName"`
 const instanceColumns = `i.id, i.name, i.slug, i.version, i.image,
@@ -27,6 +27,10 @@ export function sessionHash(token) {
   return createHash('sha256').update(token).digest('hex')
 }
 
+export function apiKeyHash(token) {
+  return createHash('sha256').update(token).digest('hex')
+}
+
 export async function initialize({ adminUsername, adminPasswordHash }) {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required')
   await pool.query(`
@@ -40,6 +44,8 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
       tenant_id uuid NOT NULL REFERENCES tenants(id), password_hash text NOT NULL,
       enabled boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now()
     );
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS mcp_admin boolean NOT NULL DEFAULT false;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS api_admin boolean NOT NULL DEFAULT false;
     CREATE TABLE IF NOT EXISTS instances (
       id uuid PRIMARY KEY, name text NOT NULL, slug text NOT NULL UNIQUE,
       version text NOT NULL, image text NOT NULL, tenant_id uuid NOT NULL REFERENCES tenants(id),
@@ -48,6 +54,7 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
     );
     ALTER TABLE instances ALTER COLUMN user_id DROP NOT NULL;
     ALTER TABLE instances ADD COLUMN IF NOT EXISTS idle_timeout_minutes integer;
+    ALTER TABLE instances ADD COLUMN IF NOT EXISTS api_max_concurrency integer NOT NULL DEFAULT 4;
     CREATE TABLE IF NOT EXISTS instance_members (
       instance_id uuid NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
       user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -77,6 +84,66 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
       expires_at timestamptz NOT NULL,
       PRIMARY KEY(session_token_hash, instance_id)
     );
+    CREATE TABLE IF NOT EXISTS mcp_servers (
+      id uuid PRIMARY KEY, name text NOT NULL, server_name text NOT NULL UNIQUE,
+      description text NOT NULL DEFAULT '', transport text NOT NULL DEFAULT 'streamable-http',
+      url text NOT NULL, headers jsonb NOT NULL DEFAULT '{}'::jsonb,
+      enabled boolean NOT NULL DEFAULT true, created_by uuid NOT NULL REFERENCES users(id),
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS space_mcp_bindings (
+      instance_id uuid NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      mcp_server_id uuid NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+      created_by uuid NOT NULL REFERENCES users(id), created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY(instance_id,mcp_server_id)
+    );
+    CREATE TABLE IF NOT EXISTS api_definitions (
+      id uuid PRIMARY KEY, slug text NOT NULL UNIQUE, name text NOT NULL, description text NOT NULL DEFAULT '',
+      instance_id uuid NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      owner_user_id uuid NOT NULL REFERENCES users(id), status text NOT NULL DEFAULT 'draft'
+        CHECK (status IN ('proposal','draft','validated','published','retired')),
+      draft_manifest jsonb NOT NULL DEFAULT '{}'::jsonb, created_by uuid NOT NULL REFERENCES users(id),
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS api_releases (
+      id uuid PRIMARY KEY, api_definition_id uuid NOT NULL REFERENCES api_definitions(id) ON DELETE CASCADE,
+      version integer NOT NULL CHECK (version > 0), contract jsonb NOT NULL, documentation jsonb NOT NULL,
+      published_by uuid NOT NULL REFERENCES users(id), published_at timestamptz NOT NULL DEFAULT now(),
+      retired_at timestamptz, UNIQUE(api_definition_id,version)
+    );
+    CREATE TABLE IF NOT EXISTS api_credentials (
+      id uuid PRIMARY KEY, instance_id uuid NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      name text NOT NULL, key_prefix text NOT NULL UNIQUE, secret_hash text NOT NULL UNIQUE,
+      max_concurrency integer NOT NULL DEFAULT 1 CHECK (max_concurrency > 0), enabled boolean NOT NULL DEFAULT true,
+      expires_at timestamptz, last_used_at timestamptz, created_by uuid NOT NULL REFERENCES users(id),
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS api_credential_grants (
+      credential_id uuid NOT NULL REFERENCES api_credentials(id) ON DELETE CASCADE,
+      api_release_id uuid NOT NULL REFERENCES api_releases(id) ON DELETE CASCADE,
+      created_by uuid NOT NULL REFERENCES users(id), created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY(credential_id,api_release_id)
+    );
+    CREATE TABLE IF NOT EXISTS api_runs (
+      id uuid PRIMARY KEY, api_release_id uuid NOT NULL REFERENCES api_releases(id),
+      credential_id uuid NOT NULL REFERENCES api_credentials(id), instance_id uuid NOT NULL REFERENCES instances(id),
+      request_id text NOT NULL UNIQUE, conversation_key text, status text NOT NULL
+        CHECK (status IN ('queued','starting','running','succeeded','failed','cancelled','timed_out')),
+      input jsonb NOT NULL, output jsonb, error_code text, error_message text,
+      queued_at timestamptz NOT NULL DEFAULT now(), started_at timestamptz, completed_at timestamptz
+    );
+    ALTER TABLE api_runs ADD COLUMN IF NOT EXISTS dsh_session_id text;
+    CREATE TABLE IF NOT EXISTS api_run_events (
+      run_id uuid NOT NULL REFERENCES api_runs(id) ON DELETE CASCADE, sequence bigint NOT NULL,
+      event_type text NOT NULL, data jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY(run_id,sequence)
+    );
+    CREATE TABLE IF NOT EXISTS api_conversations (
+      credential_id uuid NOT NULL REFERENCES api_credentials(id) ON DELETE CASCADE,
+      api_release_id uuid NOT NULL REFERENCES api_releases(id) ON DELETE CASCADE,
+      conversation_key text NOT NULL, dsh_session_id text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY(credential_id,api_release_id,conversation_key)
+    );
     CREATE INDEX IF NOT EXISTS instances_user_idx ON instances(user_id);
     CREATE INDEX IF NOT EXISTS instance_members_user_idx ON instance_members(user_id,instance_id);
     CREATE UNIQUE INDEX IF NOT EXISTS instance_members_one_owner_idx ON instance_members(instance_id) WHERE access_role='owner';
@@ -84,6 +151,10 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
     CREATE INDEX IF NOT EXISTS audit_logs_created_idx ON audit_logs(created_at DESC);
     CREATE INDEX IF NOT EXISTS audit_logs_target_user_created_idx ON audit_logs(target_user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS audit_logs_actor_created_idx ON audit_logs(actor_user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS api_definitions_instance_status_idx ON api_definitions(instance_id,status);
+    CREATE INDEX IF NOT EXISTS api_runs_status_queued_idx ON api_runs(status,queued_at);
+    CREATE INDEX IF NOT EXISTS api_runs_credential_status_idx ON api_runs(credential_id,status);
+    CREATE INDEX IF NOT EXISTS api_runs_instance_status_idx ON api_runs(instance_id,status);
   `)
   const client = await pool.connect()
   try {
@@ -225,8 +296,8 @@ export async function userById(id) {
   return (await pool.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1`, [id])).rows[0]
 }
 
-export async function updateUser(id, { displayName, role, tenantId, enabled }) {
-  await pool.query(`UPDATE users SET display_name=$2,role=$3,tenant_id=$4,enabled=$5 WHERE id=$1`, [id, displayName, role, tenantId, enabled])
+export async function updateUser(id, { displayName, role, tenantId, enabled, mcpAdmin = false, apiAdmin = false }) {
+  await pool.query(`UPDATE users SET display_name=$2,role=$3,tenant_id=$4,enabled=$5,mcp_admin=$6,api_admin=$7 WHERE id=$1`, [id, displayName, role, tenantId, enabled, mcpAdmin, apiAdmin])
   return userById(id)
 }
 
@@ -273,6 +344,306 @@ export async function setInstanceMember(instanceId, userId, accessRole) {
 export async function removeInstanceMember(instanceId, userId) {
   const result = await pool.query("DELETE FROM instance_members WHERE instance_id=$1 AND user_id=$2 AND access_role<>'owner'", [instanceId, userId])
   return result.rowCount > 0
+}
+
+export async function listMcpServers() {
+  return (await pool.query(`SELECT m.id,m.name,m.server_name AS "serverName",m.description,m.transport,m.url,
+    m.enabled,m.created_at AS "createdAt",m.updated_at AS "updatedAt",count(b.instance_id)::int AS "spaceCount",
+    (m.headers <> '{}'::jsonb) AS "hasHeaders"
+    FROM mcp_servers m LEFT JOIN space_mcp_bindings b ON b.mcp_server_id=m.id
+    GROUP BY m.id ORDER BY m.updated_at DESC`)).rows
+}
+
+export async function mcpServerById(id, includeHeaders = false) {
+  const headers = includeHeaders ? ',m.headers' : `,(m.headers <> '{}'::jsonb) AS "hasHeaders"`
+  return (await pool.query(`SELECT m.id,m.name,m.server_name AS "serverName",m.description,m.transport,m.url,m.enabled,
+    m.created_at AS "createdAt",m.updated_at AS "updatedAt"${headers} FROM mcp_servers m WHERE m.id=$1`, [id])).rows[0]
+}
+
+export async function createMcpServer(value) {
+  return (await pool.query(`INSERT INTO mcp_servers(id,name,server_name,description,transport,url,headers,enabled,created_by)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, [value.id,value.name,value.serverName,value.description,value.transport,value.url,value.headers,value.enabled,value.createdBy])).rows[0]
+}
+
+export async function updateMcpServer(id, value) {
+  await pool.query(`UPDATE mcp_servers SET name=$2,server_name=$3,description=$4,transport=$5,url=$6,
+    headers=COALESCE($7,headers),enabled=$8,updated_at=now() WHERE id=$1`, [id,value.name,value.serverName,value.description,value.transport,value.url,value.headers,value.enabled])
+  return mcpServerById(id)
+}
+
+export async function deleteMcpServer(id) {
+  return (await pool.query('DELETE FROM mcp_servers WHERE id=$1 RETURNING id', [id])).rowCount > 0
+}
+
+export async function listMcpSpaces(mcpServerId) {
+  return (await pool.query(`SELECT i.id,i.name,i.slug,i.version,i.status,t.name AS tenant,b.created_at AS "connectedAt"
+    FROM space_mcp_bindings b JOIN instances i ON i.id=b.instance_id JOIN tenants t ON t.id=i.tenant_id
+    WHERE b.mcp_server_id=$1 ORDER BY b.created_at DESC`, [mcpServerId])).rows
+}
+
+export async function listSpaceMcpBindings(instanceId, includeHeaders = false) {
+  const headers = includeHeaders ? ',m.headers' : `,(m.headers <> '{}'::jsonb) AS "hasHeaders"`
+  return (await pool.query(`SELECT m.id,m.name,m.server_name AS "serverName",m.description,m.transport,m.url,m.enabled,
+    b.created_at AS "connectedAt"${headers} FROM space_mcp_bindings b JOIN mcp_servers m ON m.id=b.mcp_server_id
+    WHERE b.instance_id=$1 ORDER BY m.name`, [instanceId])).rows
+}
+
+export async function setSpaceMcpBinding(instanceId, mcpServerId, userId) {
+  await pool.query(`INSERT INTO space_mcp_bindings(instance_id,mcp_server_id,created_by) VALUES($1,$2,$3)
+    ON CONFLICT(instance_id,mcp_server_id) DO NOTHING`, [instanceId,mcpServerId,userId])
+}
+
+export async function removeSpaceMcpBinding(instanceId, mcpServerId) {
+  return (await pool.query('DELETE FROM space_mcp_bindings WHERE instance_id=$1 AND mcp_server_id=$2', [instanceId,mcpServerId])).rowCount > 0
+}
+
+const apiRunColumns = `r.id,r.request_id AS "requestId",r.conversation_key AS "conversationKey",r.status,
+  r.input,r.output,r.error_code AS "errorCode",r.error_message AS "errorMessage",
+  r.dsh_session_id AS "dshSessionId",r.queued_at AS "queuedAt",r.started_at AS "startedAt",r.completed_at AS "completedAt",
+  r.api_release_id AS "apiReleaseId",r.credential_id AS "credentialId",r.instance_id AS "instanceId"`
+const apiRunReturning = `id,request_id AS "requestId",conversation_key AS "conversationKey",status,input,output,
+  error_code AS "errorCode",error_message AS "errorMessage",dsh_session_id AS "dshSessionId",
+  queued_at AS "queuedAt",started_at AS "startedAt",completed_at AS "completedAt",
+  api_release_id AS "apiReleaseId",credential_id AS "credentialId",instance_id AS "instanceId"`
+
+export async function resolveApiInvocation(slug, secret) {
+  const result = await pool.query(`SELECT c.id AS "credentialId",c.max_concurrency AS "credentialMaxConcurrency",
+    r.id AS "apiReleaseId",r.version,r.contract,d.id AS "apiDefinitionId",d.slug,d.name,
+    d.owner_user_id AS "ownerUserId",i.id AS "instanceId",i.slug AS "instanceSlug",i.status AS "instanceStatus"
+    FROM api_credentials c
+    JOIN api_credential_grants g ON g.credential_id=c.id
+    JOIN api_releases r ON r.id=g.api_release_id AND r.retired_at IS NULL
+    JOIN api_definitions d ON d.id=r.api_definition_id
+    JOIN instances i ON i.id=d.instance_id AND i.id=c.instance_id
+    WHERE c.secret_hash=$1 AND c.enabled=true AND (c.expires_at IS NULL OR c.expires_at>now()) AND d.slug=$2
+    ORDER BY r.version DESC LIMIT 1`, [apiKeyHash(secret), slug])
+  if (result.rowCount) await pool.query('UPDATE api_credentials SET last_used_at=now() WHERE id=$1', [result.rows[0].credentialId])
+  return result.rows[0]
+}
+
+export async function apiCredentialBySecret(secret) {
+  return (await pool.query(`SELECT id,instance_id AS "instanceId" FROM api_credentials
+    WHERE secret_hash=$1 AND enabled=true AND (expires_at IS NULL OR expires_at>now())`, [apiKeyHash(secret)])).rows[0]
+}
+
+export async function createApiRun(value) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const existing = await client.query(`SELECT ${apiRunColumns} FROM api_runs r WHERE r.request_id=$1`, [value.requestId])
+    if (existing.rowCount) {
+      await client.query('COMMIT')
+      return { run: existing.rows[0].credentialId === value.credentialId ? existing.rows[0] : undefined, created: false }
+    }
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [value.apiReleaseId])
+    const queued = Number((await client.query(`SELECT count(*)::int AS count FROM api_runs WHERE api_release_id=$1 AND status='queued'`, [value.apiReleaseId])).rows[0].count)
+    if (queued >= value.maxQueueSize) { await client.query('COMMIT'); return { queueFull: true } }
+    const result = await client.query(`INSERT INTO api_runs(id,api_release_id,credential_id,instance_id,request_id,conversation_key,status,input)
+      VALUES($1,$2,$3,$4,$5,$6,'queued',$7) RETURNING ${apiRunReturning}`,
+      [value.id,value.apiReleaseId,value.credentialId,value.instanceId,value.requestId,value.conversationKey || null,value.input])
+    await client.query('COMMIT')
+    return { run: result.rows[0], created: true }
+  } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+}
+
+export async function apiRunById(id, credentialId) {
+  const params = credentialId ? [id, credentialId] : [id]
+  const where = credentialId ? 'r.id=$1 AND r.credential_id=$2' : 'r.id=$1'
+  return (await pool.query(`SELECT ${apiRunColumns} FROM api_runs r WHERE ${where}`, params)).rows[0]
+}
+
+export async function claimApiRun() {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const candidate = await client.query(`SELECT r.id FROM api_runs r
+      JOIN api_credentials c ON c.id=r.credential_id
+      JOIN api_releases rel ON rel.id=r.api_release_id
+      WHERE r.status='queued'
+        AND (rel.contract->>'queueTimeoutSeconds' IS NULL OR r.queued_at > now() - make_interval(secs => (rel.contract->>'queueTimeoutSeconds')::int))
+        AND (SELECT count(*) FROM api_runs active WHERE active.credential_id=r.credential_id AND active.status IN ('starting','running')) < c.max_concurrency
+        AND (SELECT count(*) FROM api_runs active WHERE active.api_release_id=r.api_release_id AND active.status IN ('starting','running')) < COALESCE((rel.contract->>'maxConcurrency')::int,1)
+        AND (SELECT count(*) FROM api_runs active WHERE active.instance_id=r.instance_id AND active.status IN ('starting','running'))
+          < (SELECT api_max_concurrency FROM instances WHERE id=r.instance_id)
+        AND (r.conversation_key IS NULL OR NOT EXISTS (SELECT 1 FROM api_runs active WHERE active.credential_id=r.credential_id
+          AND active.api_release_id=r.api_release_id AND active.conversation_key=r.conversation_key AND active.status IN ('starting','running')))
+      ORDER BY r.queued_at FOR UPDATE SKIP LOCKED LIMIT 1`)
+    if (!candidate.rowCount) { await client.query('COMMIT'); return undefined }
+    const claimed = await client.query(`UPDATE api_runs SET status='starting',started_at=now() WHERE id=$1 AND status='queued'
+      RETURNING ${apiRunReturning}`, [candidate.rows[0].id])
+    await client.query('COMMIT')
+    return claimed.rows[0]
+  } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+}
+
+export async function expireQueuedApiRuns() {
+  const expired = await pool.query(`UPDATE api_runs r SET status='timed_out',completed_at=now(),
+    error_code='QUEUE_TIMEOUT',error_message='排队等待超时'
+    FROM api_releases rel WHERE rel.id=r.api_release_id AND r.status='queued'
+      AND rel.contract->>'queueTimeoutSeconds' IS NOT NULL
+      AND r.queued_at <= now() - make_interval(secs => (rel.contract->>'queueTimeoutSeconds')::int)
+    RETURNING r.id`)
+  for (const row of expired.rows) await appendApiRunEvent(row.id, 'run.failed', { code: 'QUEUE_TIMEOUT', message: '排队等待超时' })
+  return expired.rowCount
+}
+
+export async function apiRunExecutionContext(id) {
+  return (await pool.query(`SELECT ${apiRunColumns},rel.contract,d.slug AS "apiSlug",d.owner_user_id AS "ownerUserId",
+    i.slug AS "instanceSlug",i.status AS "instanceStatus"
+    FROM api_runs r JOIN api_releases rel ON rel.id=r.api_release_id
+    JOIN api_definitions d ON d.id=rel.api_definition_id JOIN instances i ON i.id=r.instance_id WHERE r.id=$1`, [id])).rows[0]
+}
+
+export async function setApiRunSession(id, sessionId) {
+  await pool.query(`UPDATE api_runs SET dsh_session_id=$2,status='running' WHERE id=$1 AND status='starting'`, [id, sessionId])
+}
+
+export async function finishApiRun(id, { status, output, errorCode, errorMessage }) {
+  await pool.query(`UPDATE api_runs SET status=$2,output=$3,error_code=$4,error_message=$5,completed_at=now()
+    WHERE id=$1 AND status IN ('starting','running')`, [id,status,output || null,errorCode || null,errorMessage || null])
+}
+
+export async function cancelApiRun(id, credentialId) {
+  return (await pool.query(`UPDATE api_runs SET status='cancelled',completed_at=now(),error_code='CANCELLED',error_message='调用方已取消'
+    WHERE id=$1 AND credential_id=$2 AND status IN ('queued','starting','running') RETURNING ${apiRunReturning}`, [id,credentialId])).rows[0]
+}
+
+export async function appendApiRunEvent(runId, eventType, data = {}) {
+  return (await pool.query(`WITH locked AS (SELECT pg_advisory_xact_lock(hashtext($1::text)))
+    INSERT INTO api_run_events(run_id,sequence,event_type,data)
+    SELECT $1::uuid,COALESCE((SELECT max(sequence)+1 FROM api_run_events WHERE run_id=$1::uuid),1),$2,$3 FROM locked
+    RETURNING sequence,event_type AS "eventType",data,created_at AS "createdAt"`, [runId,eventType,data])).rows[0]
+}
+
+export async function listApiRunEvents(runId, afterSequence = 0, limit = 200) {
+  return (await pool.query(`SELECT sequence,event_type AS "eventType",data,created_at AS "createdAt"
+    FROM api_run_events WHERE run_id=$1 AND sequence>$2 ORDER BY sequence LIMIT $3`, [runId,afterSequence,Math.min(Math.max(limit,1),500)])).rows
+}
+
+export async function getApiConversation(credentialId, apiReleaseId, conversationKey) {
+  if (!conversationKey) return undefined
+  return (await pool.query(`SELECT dsh_session_id AS "dshSessionId" FROM api_conversations
+    WHERE credential_id=$1 AND api_release_id=$2 AND conversation_key=$3`, [credentialId,apiReleaseId,conversationKey])).rows[0]
+}
+
+export async function setApiConversation(credentialId, apiReleaseId, conversationKey, sessionId) {
+  if (!conversationKey) return
+  await pool.query(`INSERT INTO api_conversations(credential_id,api_release_id,conversation_key,dsh_session_id)
+    VALUES($1,$2,$3,$4) ON CONFLICT(credential_id,api_release_id,conversation_key)
+    DO UPDATE SET dsh_session_id=EXCLUDED.dsh_session_id,updated_at=now()`, [credentialId,apiReleaseId,conversationKey,sessionId])
+}
+
+export async function listApiDefinitions(user, globalAccess = false) {
+  const params = globalAccess ? [] : [user.id]
+  const access = globalAccess ? '' : `JOIN instance_members access ON access.instance_id=d.instance_id AND access.user_id=$1 AND access.access_role IN ('owner','operator')`
+  return (await pool.query(`SELECT d.id,d.slug,d.name,d.description,d.status,d.draft_manifest AS "draftManifest",
+    d.instance_id AS "instanceId",i.name AS "instanceName",d.owner_user_id AS "ownerUserId",u.display_name AS "ownerName",
+    d.created_at AS "createdAt",d.updated_at AS "updatedAt",latest.id AS "releaseId",latest.version AS "releaseVersion",
+    (latest.id IS NOT NULL AND latest.retired_at IS NULL) AS "releaseActive",
+    COALESCE(stats.run_count,0)::int AS "runCount",COALESCE(stats.failed_count,0)::int AS "failedCount"
+    FROM api_definitions d JOIN instances i ON i.id=d.instance_id JOIN users u ON u.id=d.owner_user_id ${access}
+    LEFT JOIN LATERAL (SELECT id,version,retired_at FROM api_releases WHERE api_definition_id=d.id ORDER BY version DESC LIMIT 1) latest ON true
+    LEFT JOIN LATERAL (SELECT count(*) run_count,count(*) FILTER (WHERE status='failed') failed_count FROM api_runs WHERE api_release_id=latest.id) stats ON true
+    ORDER BY d.updated_at DESC`, params)).rows
+}
+
+export async function apiDefinitionById(id) {
+  return (await pool.query(`SELECT d.id,d.slug,d.name,d.description,d.status,d.draft_manifest AS "draftManifest",
+    d.instance_id AS "instanceId",i.name AS "instanceName",i.tenant_id AS "tenantId",
+    d.owner_user_id AS "ownerUserId",u.display_name AS "ownerName",d.created_at AS "createdAt",d.updated_at AS "updatedAt"
+    FROM api_definitions d JOIN instances i ON i.id=d.instance_id JOIN users u ON u.id=d.owner_user_id WHERE d.id=$1`, [id])).rows[0]
+}
+
+export async function listApiDefinitionsByInstance(instanceId) {
+  return (await pool.query(`SELECT d.id,d.slug,d.name,d.description,d.status,d.draft_manifest AS "draftManifest",
+    d.instance_id AS "instanceId",d.owner_user_id AS "ownerUserId",u.display_name AS "ownerName",
+    d.created_at AS "createdAt",d.updated_at AS "updatedAt"
+    FROM api_definitions d JOIN users u ON u.id=d.owner_user_id
+    WHERE d.instance_id=$1 ORDER BY d.updated_at DESC LIMIT 100`, [instanceId])).rows
+}
+
+export async function createApiDefinition(value) {
+  await pool.query(`INSERT INTO api_definitions(id,slug,name,description,instance_id,owner_user_id,status,draft_manifest,created_by)
+    VALUES($1,$2,$3,$4,$5,$6,'draft',$7,$8)`, [value.id,value.slug,value.name,value.description,value.instanceId,value.ownerUserId,value.manifest,value.createdBy])
+  return apiDefinitionById(value.id)
+}
+
+export async function updateApiDefinition(id, value) {
+  await pool.query(`UPDATE api_definitions SET slug=$2,name=$3,description=$4,instance_id=$5,owner_user_id=$6,
+    draft_manifest=$7,status='draft',updated_at=now() WHERE id=$1`, [id,value.slug,value.name,value.description,value.instanceId,value.ownerUserId,value.manifest])
+  return apiDefinitionById(id)
+}
+
+export async function setApiDefinitionValidated(id) {
+  return (await pool.query(`UPDATE api_definitions SET status='validated',updated_at=now() WHERE id=$1 AND status IN ('draft','validated') RETURNING id`, [id])).rowCount > 0
+}
+
+export async function publishApiDefinition(id, documentationFor, userId) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const definition = await client.query(`SELECT * FROM api_definitions WHERE id=$1 AND status='validated' FOR UPDATE`, [id])
+    if (!definition.rowCount) { await client.query('ROLLBACK'); return undefined }
+    const version = Number((await client.query('SELECT COALESCE(max(version),0)+1 version FROM api_releases WHERE api_definition_id=$1', [id])).rows[0].version)
+    const documentation = documentationFor({ ...definition.rows[0], version, contract: definition.rows[0].draft_manifest })
+    const release = await client.query(`INSERT INTO api_releases(id,api_definition_id,version,contract,documentation,published_by)
+      VALUES(gen_random_uuid(),$1,$2,$3,$4,$5) RETURNING id,version,contract,documentation,published_at AS "publishedAt"`,
+      [id,version,definition.rows[0].draft_manifest,documentation,userId])
+    await client.query(`UPDATE api_definitions SET status='published',updated_at=now() WHERE id=$1`, [id])
+    await client.query('COMMIT')
+    return release.rows[0]
+  } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+}
+
+export async function apiReleaseByDefinition(id) {
+  return (await pool.query(`SELECT r.id,r.version,r.contract,r.documentation,r.published_at AS "publishedAt",r.retired_at AS "retiredAt"
+    FROM api_releases r WHERE r.api_definition_id=$1 ORDER BY version DESC LIMIT 1`, [id])).rows[0]
+}
+
+export async function retireApiDefinition(id) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('UPDATE api_releases SET retired_at=COALESCE(retired_at,now()) WHERE api_definition_id=$1 AND retired_at IS NULL', [id])
+    const result = await client.query(`UPDATE api_definitions SET status='retired',updated_at=now() WHERE id=$1 RETURNING id,instance_id AS "instanceId"`, [id])
+    await client.query('COMMIT')
+    return result.rows[0]
+  } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+}
+
+export async function listApiRunsByDefinition(definitionId, limit = 50) {
+  return (await pool.query(`SELECT ${apiRunColumns},c.name AS "credentialName",c.key_prefix AS "keyPrefix"
+    FROM api_runs r JOIN api_releases rel ON rel.id=r.api_release_id JOIN api_credentials c ON c.id=r.credential_id
+    WHERE rel.api_definition_id=$1 ORDER BY r.queued_at DESC LIMIT $2`, [definitionId,Math.min(Math.max(Number(limit)||50,1),100)])).rows
+}
+
+export async function listApiCredentials(instanceId) {
+  return (await pool.query(`SELECT c.id,c.name,c.key_prefix AS "keyPrefix",c.max_concurrency AS "maxConcurrency",c.enabled,
+    c.expires_at AS "expiresAt",c.last_used_at AS "lastUsedAt",c.created_at AS "createdAt",
+    COALESCE(json_agg(json_build_object('releaseId',g.api_release_id,'definitionId',d.id,'name',d.name,'version',r.version))
+      FILTER (WHERE g.api_release_id IS NOT NULL),'[]') AS grants
+    FROM api_credentials c LEFT JOIN api_credential_grants g ON g.credential_id=c.id
+    LEFT JOIN api_releases r ON r.id=g.api_release_id LEFT JOIN api_definitions d ON d.id=r.api_definition_id
+    WHERE c.instance_id=$1 GROUP BY c.id ORDER BY c.created_at DESC`, [instanceId])).rows
+}
+
+export async function createApiCredential(value) {
+  await pool.query(`INSERT INTO api_credentials(id,instance_id,name,key_prefix,secret_hash,max_concurrency,enabled,expires_at,created_by)
+    VALUES($1,$2,$3,$4,$5,$6,true,$7,$8)`, [value.id,value.instanceId,value.name,value.keyPrefix,value.secretHash,value.maxConcurrency,value.expiresAt || null,value.createdBy])
+}
+
+export async function setApiCredentialGrant(credentialId, releaseId, userId, enabled) {
+  if (enabled) await pool.query(`INSERT INTO api_credential_grants(credential_id,api_release_id,created_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`, [credentialId,releaseId,userId])
+  else await pool.query('DELETE FROM api_credential_grants WHERE credential_id=$1 AND api_release_id=$2', [credentialId,releaseId])
+}
+
+export async function apiCredentialById(id) {
+  return (await pool.query(`SELECT id,instance_id AS "instanceId",name,enabled FROM api_credentials WHERE id=$1`, [id])).rows[0]
+}
+
+export async function updateApiCredential(id, instanceId, { enabled, maxConcurrency }) {
+  return (await pool.query(`UPDATE api_credentials SET enabled=$3,max_concurrency=$4 WHERE id=$1 AND instance_id=$2
+    RETURNING id,instance_id AS "instanceId",name,enabled,max_concurrency AS "maxConcurrency"`, [id,instanceId,enabled,maxConcurrency])).rows[0]
 }
 
 export async function health() { await pool.query('SELECT 1') }

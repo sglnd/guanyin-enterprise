@@ -1,239 +1,74 @@
-const $ = selector => document.querySelector(selector)
-const $$ = selector => [...document.querySelectorAll(selector)]
-let me
-let overview
-let auditUser
-let selectedSpace
-let spaceMembers = []
-let instancePollTimer
-let auditOffset = 0
-const auditPageSize = 20
-let adminAuditOffset = 0
-const adminAuditPageSize = 20
-
-async function request(path, options = {}) {
-  const response = await fetch(path, { headers: { 'content-type': 'application/json' }, ...options })
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(data.error || '请求失败')
-  return data
-}
-
-function showLogin() { clearTimeout(instancePollTimer); $('#login').classList.remove('hidden'); $('#app').classList.add('hidden') }
-function showApp() {
-  $('#login').classList.add('hidden'); $('#app').classList.remove('hidden')
-  $('#display-name').textContent = me.displayName; $('#tenant-name').textContent = me.tenantName || '平台'
-  $('#avatar').textContent = me.displayName.slice(0, 1); $$('.admin-only').forEach(el => el.classList.toggle('hidden', me.role !== 'platform_admin'))
-  $$('.nav').forEach(el => el.classList.toggle('active', el.dataset.view === 'instances'))
-  $$('.view').forEach(el => el.classList.toggle('hidden', el.id !== 'instances-view'))
-  $('#page-title').textContent = '我的工作空间'
-  $('#admin-instance-grid').innerHTML = ''; $('#audit-table').innerHTML = ''
-}
-
-function scheduleInstancePoll(loader, instances) {
-  clearTimeout(instancePollTimer)
-  if (instances.some(instance => ['starting','provisioning','stopping'].includes(instance.status))) instancePollTimer = setTimeout(loader, 3000)
-}
-
-function instanceCard(instance, admin = false) {
-  const status = ({running:'运行中',starting:'启动中',provisioning:'创建中',stopped:'已休眠',stopping:'休眠中',error:'异常'})[instance.status] || instance.status
-  const busy = ['starting','provisioning','stopping'].includes(instance.status)
-  let primary
-  if (instance.status === 'running') primary = admin ? `<button class="impersonate" data-id="${instance.id}" data-name="${escapeHtml(instance.name)}">管理员代入访问</button>` : `<button class="enter" data-id="${instance.id}">进入工作空间</button>`
-  else primary = `<button class="wake" data-id="${instance.id}" ${busy ? 'disabled' : ''}>${instance.status === 'stopped' ? '启动空间' : '重试启动'}</button>`
-  const sleep = instance.idleTimeoutMinutes == null ? '永不休眠' : `${instance.idleTimeoutMinutes} 分钟休眠`
-  const identity = admin ? `${instance.memberCount} 位成员` : ({owner:'负责人',operator:'运维者',member:'成员'})[instance.accessRole]
-  const canStop = admin || ['owner','operator'].includes(instance.accessRole)
-  return `<article class="instance-card"><div class="top"><div class="instance-icon">◇</div><span class="status ${instance.status}">${status}</span></div><h3>${escapeHtml(instance.name)}</h3><p>${escapeHtml(instance.tenant || '')} · ${escapeHtml(identity || '尚未授权成员')}</p><div class="space-policy">${escapeHtml(sleep)}</div><div class="meta"><span>DSH ${escapeHtml(instance.version)}</span><span>${new Date(instance.createdAt).toLocaleDateString()}</span></div>${primary}${instance.status === 'running' && canStop ? `<button class="sleep" data-id="${instance.id}">停止空间</button>` : ''}${admin ? `<button class="manage-space" data-id="${instance.id}">管理空间</button>` : ''}</article>`
-}
-
-function bindInstanceActions(root, reload) {
-  root.querySelectorAll('.enter').forEach(button => button.onclick = async () => { button.disabled = true; const result = await request(`/api/instances/${button.dataset.id}/launch`, { method: 'POST' }); if (result.location) location.href = result.location; else setTimeout(reload, 2500) })
-  root.querySelectorAll('.wake').forEach(button => button.onclick = async () => { button.disabled = true; await request(`/api/instances/${button.dataset.id}/start`, { method: 'POST' }); setTimeout(reload, 2500) })
-  root.querySelectorAll('.sleep').forEach(button => button.onclick = async () => { button.disabled = true; await request(`/api/instances/${button.dataset.id}/stop`, { method: 'POST' }); await reload() })
-  root.querySelectorAll('.impersonate').forEach(button => button.onclick = async () => {
-    const confirmed = confirm(`管理员代入访问确认\n\n空间：${button.dataset.name}\n\n您将访问该共享空间，本次操作将写入审计日志。`)
-    if (!confirmed) return
-    button.disabled = true
-    try { const result = await request(`/api/admin/instances/${button.dataset.id}/impersonate`, { method: 'POST' }); location.href = result.location }
-    catch (error) { alert(error.message); button.disabled = false }
-  })
-  root.querySelectorAll('.manage-space').forEach(button => button.onclick = () => openSpaceManagement(button.dataset.id))
-}
-
-async function loadInstances() {
-  const { instances } = await request('/api/instances')
-  const root = $('#instance-grid')
-  root.innerHTML = instances.length ? instances.map(instance => instanceCard(instance)).join('') : '<div class="empty">尚未授权可访问的 DSH 空间。</div>'
-  bindInstanceActions(root, loadInstances)
-  scheduleInstancePoll(loadInstances, instances)
-}
-
-async function loadAdminInstances() {
-  if (me.role !== 'platform_admin') return
-  const { instances } = await request('/api/admin/instances')
-  const root = $('#admin-instance-grid')
-  root.innerHTML = instances.length ? instances.map(instance => instanceCard(instance, true)).join('') : '<div class="empty">尚无空间。</div>'
-  bindInstanceActions(root, loadAdminInstances)
-  scheduleInstancePoll(loadAdminInstances, instances)
-  await loadAdminAudit(adminAuditOffset)
-}
-
-async function loadAdminAudit(offset = 0) {
-  if (me.role !== 'platform_admin') return
-  adminAuditOffset = Math.max(offset, 0)
-  const result = await request(`/api/admin/audit-logs?limit=${adminAuditPageSize}&offset=${adminAuditOffset}`)
-  $('#audit-table').innerHTML = result.logs.length ? '<div class="row head"><span>时间</span><span>操作</span><span>目标</span></div>' + result.logs.map(log => `<div class="row"><span>${new Date(log.createdAt).toLocaleString()}</span><span>${escapeHtml(log.actor)} · ${escapeHtml(actionNames[log.action] || log.action)}</span><span>${escapeHtml(log.targetInstance || '')} · ${escapeHtml(log.targetUser || '')}</span></div>`).join('') : '<div class="empty compact">暂无管理员操作记录。</div>'
-  $('#admin-audit-page').textContent = `${Math.floor(adminAuditOffset / adminAuditPageSize) + 1} / ${Math.max(Math.ceil(result.total / adminAuditPageSize), 1)} 页 · 共 ${result.total} 条`
-  $('#admin-audit-prev').disabled = adminAuditOffset === 0
-  $('#admin-audit-next').disabled = adminAuditOffset + adminAuditPageSize >= result.total
-}
-
-function escapeHtml(value) { const div = document.createElement('div'); div.textContent = value; return div.innerHTML }
-function roleName(role) { return role === 'platform_admin' ? '平台管理员' : role === 'tenant_admin' ? '租户管理员' : '普通用户' }
-const actionNames = {
-  user_login: '登录', user_logout: '退出', user_create: '创建用户', user_update: '修改用户信息',
-  user_password_reset: '初始化密码', dsh_enter: '进入工作空间', dsh_operation: 'DSH 操作',
-  instance_start: '启动空间', instance_stop: '停止空间', space_create: '创建空间', space_update: '修改空间',
-  space_member_set: '设置空间成员', space_member_remove: '移除空间成员',
-  admin_impersonation_start: '管理员代入访问', admin_instance_start: '管理员启动空间', admin_instance_stop: '管理员停止空间',
-}
-function auditDescription(log) {
-  if (log.action === 'dsh_operation') return `${log.details?.path || 'DSH 请求'} · HTTP ${log.details?.status || '-'} · ${log.details?.durationMs ?? '-'}ms`
-  if (log.action === 'user_update') return '显示名称、角色、租户或启用状态发生变更'
-  if (log.action === 'user_password_reset') return '旧登录会话已全部注销'
-  return [log.targetInstance, log.targetUser].filter(Boolean).join(' · ') || '-'
-}
-
-async function loadOverview() {
-  if (me.role !== 'platform_admin') return
-  overview = await request('/api/admin/overview')
-  const tenantOptions = overview.tenants.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('')
-  $('#user-form select[name=tenantId]').innerHTML = tenantOptions
-  $('#instance-form select[name=tenantId]').innerHTML = tenantOptions
-  $('#user-table').innerHTML = '<div class="row user-row head"><span>用户</span><span>租户</span><span>角色</span><span>操作</span></div>' + overview.users.map(u => `<div class="row user-row"><span><strong>${escapeHtml(u.displayName)}</strong><small>${escapeHtml(u.username)}${u.enabled ? '' : ' · 已停用'}</small></span><span>${escapeHtml(u.tenantName || '')}</span><span class="pill">${roleName(u.role)}</span><span class="row-actions"><button class="user-audit" data-id="${u.id}">审计</button>${u.role === 'platform_admin' ? '' : `<button class="user-edit" data-id="${u.id}">编辑</button><button class="user-password" data-id="${u.id}">初始化密码</button>`}</span></div>`).join('')
-  bindUserActions()
-  $('#tenant-table').innerHTML = '<div class="row head"><span>租户</span><span>编码</span><span>成员数</span></div>' + overview.tenants.map(t => `<div class="row"><strong>${escapeHtml(t.name)}</strong><span>${escapeHtml(t.code)}</span><span>${overview.users.filter(u => u.tenantId === t.id).length}</span></div>`).join('')
-}
-
-function sleepOptions(selected) {
-  const values = [['never','永不休眠'],[30,'空闲 30 分钟'],[60,'空闲 1 小时'],[120,'空闲 2 小时'],[240,'空闲 4 小时'],[480,'空闲 8 小时']]
-  return values.map(([value,label]) => `<option value="${value}" ${String(selected ?? 'never') === String(value) ? 'selected' : ''}>${label}</option>`).join('')
-}
-
-async function openSpaceManagement(id) {
-  selectedSpace = (await request('/api/admin/instances')).instances.find(item => item.id === id)
-  if (!selectedSpace) return
-  const form = $('#space-settings-form'); form.elements.name.value = selectedSpace.name
-  form.elements.idleTimeoutMinutes.innerHTML = sleepOptions(selectedSpace.idleTimeoutMinutes)
-  form.querySelector('button[type=submit]').textContent = '保存空间设置'; $('#space-settings-message').textContent = ''
-  $('#space-dialog-name').textContent = selectedSpace.name
-  const eligible = overview.users.filter(u => u.role !== 'platform_admin' && u.tenantId === selectedSpace.tenantId)
-  $('#space-member-form select[name=userId]').innerHTML = eligible.map(u => `<option value="${u.id}">${escapeHtml(u.displayName)}（${escapeHtml(u.username)}）</option>`).join('')
-  await loadSpaceMembers(); $('#space-dialog').showModal()
-}
-
-async function loadSpaceMembers() {
-  const result = await request(`/api/admin/instances/${selectedSpace.id}/members`); spaceMembers = result.members
-  $('#space-member-list').innerHTML = spaceMembers.length ? spaceMembers.map(member => `<div class="member-row"><span><strong>${escapeHtml(member.displayName)}</strong><small>${escapeHtml(member.username)}</small></span><span class="pill">${({owner:'负责人',operator:'运维者',member:'成员'})[member.accessRole]}</span>${member.accessRole === 'owner' ? '<span></span>' : `<button class="remove-member" data-id="${member.id}">移除</button>`}</div>`).join('') : '<div class="empty compact">尚未绑定成员。</div>'
-  $('#space-member-list').querySelectorAll('.remove-member').forEach(button => button.onclick = async () => { await request(`/api/admin/instances/${selectedSpace.id}/members/${button.dataset.id}`, { method: 'DELETE' }); await Promise.all([loadSpaceMembers(),loadAdminInstances()]) })
-  const memberSelect = $('#space-member-form select[name=userId]')
-  const syncRole = () => { const current = spaceMembers.find(member => member.id === memberSelect.value); $('#space-member-form select[name=accessRole]').value = current?.accessRole || 'member' }
-  memberSelect.onchange = syncRole; syncRole()
-}
-
-function bindUserActions() {
-  $('#user-table').querySelectorAll('.user-audit').forEach(button => button.onclick = () => openUserAudit(button.dataset.id))
-  $('#user-table').querySelectorAll('.user-edit').forEach(button => button.onclick = () => openUserEdit(button.dataset.id))
-  $('#user-table').querySelectorAll('.user-password').forEach(button => button.onclick = () => resetUserPassword(button.dataset.id))
-}
-
-function openUserEdit(id) {
-  const user = overview.users.find(item => item.id === id)
-  if (!user) return
-  const form = $('#edit-user-form')
-  form.dataset.id = id
-  form.elements.displayName.value = user.displayName
-  form.elements.role.value = user.role
-  form.elements.tenantId.innerHTML = overview.tenants.map(t => `<option value="${t.id}">${escapeHtml(t.name)}</option>`).join('')
-  form.elements.tenantId.value = user.tenantId
-  form.elements.enabled.checked = user.enabled
-  $('#edit-user-name').textContent = user.username
-  $('#edit-user-message').textContent = ''
-  $('#edit-user-dialog').showModal()
-}
-
-async function openUserAudit(id, offset = 0) {
-  auditUser = overview.users.find(item => item.id === id)
-  if (!auditUser) return
-  auditOffset = Math.max(offset, 0)
-  $('#audit-user-name').textContent = `${auditUser.displayName}（${auditUser.username}）`
-  $('#user-audit-table').innerHTML = '<div class="loading">正在读取审计日志…</div>'
-  if (!$('#user-audit-dialog').open) $('#user-audit-dialog').showModal()
-  try {
-    const result = await request(`/api/admin/users/${id}/audit-logs?limit=${auditPageSize}&offset=${auditOffset}`)
-    $('#user-audit-table').innerHTML = result.logs.length ? result.logs.map(log => `<div class="audit-item"><div><strong>${escapeHtml(actionNames[log.action] || log.action)}</strong><time>${new Date(log.createdAt).toLocaleString()}</time></div><p>${escapeHtml(auditDescription(log))}</p><small>操作人：${escapeHtml(log.actor)}${log.details?.ip ? ` · IP ${escapeHtml(log.details.ip)}` : ''}</small></div>`).join('') : '<div class="empty compact">暂无审计记录。</div>'
-    $('#audit-page').textContent = `${Math.floor(auditOffset / auditPageSize) + 1} / ${Math.max(Math.ceil(result.total / auditPageSize), 1)} 页 · 共 ${result.total} 条`
-    $('#audit-prev').disabled = auditOffset === 0
-    $('#audit-next').disabled = auditOffset + auditPageSize >= result.total
-  } catch (error) { $('#user-audit-table').innerHTML = `<div class="error">${escapeHtml(error.message)}</div>` }
-}
-
-async function resetUserPassword(id) {
-  const user = overview.users.find(item => item.id === id)
-  if (!user || !confirm(`确定初始化 ${user.displayName}（${user.username}）的密码吗？\n\n该用户当前所有登录会话会立即失效。`)) return
-  try {
-    const result = await request(`/api/admin/users/${id}/reset-password`, { method: 'POST' })
-    $('#password-user-name').textContent = user.displayName
-    $('#temporary-password').textContent = result.temporaryPassword
-    $('#copy-password').textContent = '复制密码'
-    $('#password-dialog').showModal()
-  } catch (error) { alert(error.message) }
-}
-
-async function submitForm(form, path) {
-  const message = form.querySelector('.form-message'); const button = form.querySelector('button'); message.textContent = ''; button.disabled = true
-  try { const body = Object.fromEntries(new FormData(form)); await request(path, { method: 'POST', body: JSON.stringify(body) }); message.style.color = '#2d8067'; message.textContent = '操作成功'; form.reset(); await Promise.all([loadOverview(), loadInstances(), loadAdminInstances()]) }
-  catch (error) { message.style.color = ''; message.textContent = error.message }
-  finally { button.disabled = false }
-}
-
-$('#login-form').onsubmit = async event => { event.preventDefault(); $('#login-error').textContent = ''; try { const result = await request('/api/login', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target))) }); me = result.user; showApp(); await Promise.all([loadInstances(), loadOverview()]) } catch (error) { $('#login-error').textContent = error.message } }
-$('#logout').onclick = async () => { await request('/api/logout', { method: 'POST' }); me = undefined; showLogin() }
-$('#refresh').onclick = loadInstances
-$('#admin-refresh').onclick = loadAdminInstances
-$('#user-form').onsubmit = event => { event.preventDefault(); submitForm(event.target, '/api/admin/users') }
-$('#tenant-form').onsubmit = event => { event.preventDefault(); submitForm(event.target, '/api/admin/tenants') }
-$('#instance-form').onsubmit = event => { event.preventDefault(); submitForm(event.target, '/api/admin/instances') }
-$('#space-settings-form').onsubmit = async event => {
-  event.preventDefault(); const form = event.target; const button = form.querySelector('button[type=submit]'); button.disabled = true
-  try {
-    const result = await request(`/api/admin/instances/${selectedSpace.id}`, { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(form))) })
-    selectedSpace = result.instance; await loadAdminInstances(); $('#space-dialog-name').textContent = form.elements.name.value
-    $('#space-settings-message').textContent = '设置已保存并立即生效'; button.textContent = '已保存'
-  } catch (error) { alert(error.message) } finally { button.disabled = false }
-}
-$('#space-member-form').onsubmit = async event => {
-  event.preventDefault(); const form = event.target; const button = form.querySelector('button'); button.disabled = true
-  try {
-    await request(`/api/admin/instances/${selectedSpace.id}/members`, { method: 'PUT', body: JSON.stringify(Object.fromEntries(new FormData(form))) })
-    await Promise.all([loadSpaceMembers(),loadAdminInstances(),loadInstances()])
-  } catch (error) { alert(error.message) } finally { button.disabled = false }
-}
-$('#edit-user-form').onsubmit = async event => {
-  event.preventDefault(); const form = event.target; const button = form.querySelector('button[type=submit]'); button.disabled = true; $('#edit-user-message').textContent = ''
-  try {
-    const body = Object.fromEntries(new FormData(form)); body.enabled = form.elements.enabled.checked
-    await request(`/api/admin/users/${form.dataset.id}`, { method: 'PATCH', body: JSON.stringify(body) })
-    $('#edit-user-dialog').close(); await loadOverview()
-  } catch (error) { $('#edit-user-message').textContent = error.message } finally { button.disabled = false }
-}
-$$('[data-close-dialog]').forEach(button => button.onclick = () => button.closest('dialog').close())
-$('#audit-prev').onclick = () => openUserAudit(auditUser.id, auditOffset - auditPageSize)
-$('#audit-next').onclick = () => openUserAudit(auditUser.id, auditOffset + auditPageSize)
-$('#admin-audit-prev').onclick = () => loadAdminAudit(adminAuditOffset - adminAuditPageSize)
-$('#admin-audit-next').onclick = () => loadAdminAudit(adminAuditOffset + adminAuditPageSize)
-$('#copy-password').onclick = async () => { await navigator.clipboard.writeText($('#temporary-password').textContent); $('#copy-password').textContent = '已复制' }
-$$('.nav').forEach(button => button.onclick = async () => { clearTimeout(instancePollTimer); $$('.nav').forEach(v => v.classList.remove('active')); button.classList.add('active'); $$('.view').forEach(v => v.classList.add('hidden')); $(`#${button.dataset.view}-view`).classList.remove('hidden'); $('#page-title').textContent = ({instances:'我的工作空间','instance-admin':'空间管理',users:'用户与租户管理'})[button.dataset.view]; if (button.dataset.view === 'instance-admin') await loadAdminInstances(); if (button.dataset.view === 'instances') await loadInstances() })
-$$('.tab').forEach(button => button.onclick = () => { $$('.tab').forEach(v => v.classList.remove('active')); button.classList.add('active'); $$('.tab-body').forEach(v => v.classList.add('hidden')); $(`#${button.dataset.tab}-tab`).classList.remove('hidden') })
-
-try { const result = await request('/api/me'); me = result.user; showApp(); await Promise.all([loadInstances(), loadOverview()]) } catch { showLogin() }
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)]
+let me,overview={users:[],tenants:[],versions:[]},userInstances=[],adminInstances=[],mcpServers=[],mcpCanManage=false,apiDefinitions=[],apiCanManage=false,apiCatalog={instances:[],users:[],members:{}},selectedApi,selectedSpace,auditUser,spaceMembers=[],poll,auditOffset=0,adminAuditOffset=0,adminAuditPageSize=20
+const pageSize=20,statusName={running:'运行中',starting:'启动中',provisioning:'创建中',stopped:'已休眠',stopping:'休眠中',error:'异常'},roleName=r=>({platform_admin:'平台管理员',tenant_admin:'租户管理员',member:'普通用户'})[r]||r,accessName={owner:'负责人',operator:'运维者',member:'成员'}
+const actionNames={user_login:'登录',user_logout:'退出',user_create:'创建用户',user_update:'修改用户信息',user_password_reset:'初始化密码',dsh_enter:'进入工作空间',dsh_operation:'DSH 操作',instance_start:'启动空间',instance_stop:'停止空间',space_create:'创建空间',space_update:'修改空间',space_member_set:'设置空间成员',space_member_remove:'移除空间成员',mcp_create:'新增 MCP',mcp_update:'修改 MCP',space_mcp_connect:'空间接入 MCP',space_mcp_disconnect:'空间取消 MCP',api_definition_ai_generate:'AI 生成接口建议',api_definition_create:'新增接口',api_definition_update:'修改接口',api_definition_validate:'校验接口',api_definition_publish:'发布接口',api_definition_retire:'下线接口',api_credential_create:'创建接口凭证',api_credential_grant:'授权接口凭证',api_credential_revoke:'撤销接口凭证',api_credential_enable:'启用接口凭证',api_credential_disable:'停用接口凭证',admin_impersonation_start:'管理员代入访问',admin_instance_start:'管理员启动空间',admin_instance_stop:'管理员停止空间'}
+async function request(path,options={}){const response=await fetch(path,{headers:{'content-type':'application/json'},...options}),data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||'请求失败');return data}
+function esc(value=''){const div=document.createElement('div');div.textContent=String(value);return div.innerHTML}
+function toast(message,type='success'){const item=document.createElement('div');item.className=`toast ${type==='error'?'error-toast':''}`;item.textContent=message;$('#toast-region').append(item);setTimeout(()=>item.remove(),3600)}
+function confirmAction(title,message,label='确认',danger=false){return new Promise(resolve=>{const d=$('#confirm-dialog'),done=value=>{d.close();resolve(value)};$('#confirm-title').textContent=title;$('#confirm-message').textContent=message;$('#confirm-accept').textContent=label;$('#confirm-accept').classList.toggle('danger',danger);$('#confirm-cancel').onclick=()=>done(false);$('#confirm-accept').onclick=()=>done(true);d.oncancel=e=>{e.preventDefault();done(false)};d.showModal()})}
+function showLogin(){clearTimeout(poll);$('#login').classList.remove('hidden');$('#app').classList.add('hidden')}
+function showApp(){$('#login').classList.add('hidden');$('#app').classList.remove('hidden');$('#display-name').textContent=me.displayName;$('#tenant-name').textContent=me.tenantName||'观因平台';$('#avatar').textContent=me.displayName[0];$('#runtime-version').textContent='运行核心';$$('.admin-only').forEach(el=>el.classList.toggle('hidden',me.role!=='platform_admin'));$$('.mcp-manager-only').forEach(el=>el.classList.toggle('hidden',me.role!=='platform_admin'&&!me.mcpAdmin));navigate('instances')}
+function schedule(loader,items){clearTimeout(poll);if(items.some(x=>['starting','provisioning','stopping'].includes(x.status)))poll=setTimeout(loader,3000)}
+function summary(root,items){$(root).innerHTML=items.map(x=>`<div class="summary-item"><span>${esc(x[0])}</span><strong>${esc(x[1])}</strong><small>${esc(x[2])}</small></div>`).join('')}
+function card(x,admin=false){const busy=['starting','provisioning','stopping'].includes(x.status),identity=admin?`${x.memberCount||0} 位成员`:accessName[x.accessRole],canManage=admin||['owner','operator'].includes(x.accessRole),primary=x.status==='running'?(admin?`<button class="impersonate primary" data-id="${x.id}" data-name="${esc(x.name)}">代入访问</button>`:`<button class="enter primary" data-id="${x.id}">进入空间</button>`):`<button class="wake primary" data-id="${x.id}" ${busy?'disabled':''}>${x.status==='stopped'?'启动空间':'重试启动'}</button>`;return `<article class="instance-card"><div class="top"><div class="instance-icon"><img src="/guanyin-logo.png" alt=""></div><span class="status ${esc(x.status)}">${esc(statusName[x.status]||x.status)}</span></div><h3>${esc(x.name)}</h3><p>${esc(x.tenant||'')} · ${esc(identity||'尚未授权成员')}</p><div class="space-policy">${x.idleTimeoutMinutes==null?'永不休眠':`空闲 ${x.idleTimeoutMinutes} 分钟休眠`}</div><div class="meta"><span>运行核心 ${esc(x.version||'-')}</span><span>${new Date(x.createdAt).toLocaleDateString()}</span></div><div class="instance-actions">${primary}${x.status==='running'&&canManage?`<button class="sleep" data-id="${x.id}">停止</button>`:''}${canManage?`<button class="manage-mcp" data-id="${x.id}">MCP</button>`:''}${admin?`<button class="manage-space" data-id="${x.id}">管理</button>`:''}</div></article>`}
+function filtered(items,search,filters){const q=$(search).value.trim().toLowerCase(),s=$(`${filters} .active`)?.dataset.status||'all';return items.filter(x=>(!q||`${x.name} ${x.tenant||''} ${x.version||''}`.toLowerCase().includes(q))&&(s==='all'||x.status===s||(s==='transitional'&&['starting','provisioning','stopping'].includes(x.status))))}
+function renderInstances(){const items=filtered(userInstances,'#instance-search','#instance-filters'),root=$('#instance-grid');root.innerHTML=items.length?items.map(x=>card(x)).join(''):'<div class="empty">没有符合当前条件的工作空间。</div>';bindCards(root,loadInstances);summary('#workspace-summary',[['已授权空间',userInstances.length,'当前账号可访问'],['运行中',userInstances.filter(x=>x.status==='running').length,'可立即进入'],['已休眠',userInstances.filter(x=>x.status==='stopped').length,'按需唤醒'],['当前身份',roleName(me.role),me.tenantName||'观因平台']])}
+function renderAdmin(){const items=filtered(adminInstances,'#admin-instance-search','#admin-instance-filters'),root=$('#admin-instance-grid');root.innerHTML='<button class="create-card" type="button"><span>＋</span><strong>创建工作空间</strong><small>选择租户与运行核心版本</small></button>'+(items.length?items.map(x=>card(x,true)).join(''):'<div class="empty">没有符合当前条件的空间。</div>');root.querySelector('.create-card').onclick=openCreateSpace;bindCards(root,loadAdminInstances);summary('#admin-space-summary',[['空间总数',adminInstances.length,'全部租户'],['运行中',adminInstances.filter(x=>x.status==='running').length,'服务可用'],['已休眠',adminInstances.filter(x=>x.status==='stopped').length,'节省资源'],['成员授权',adminInstances.reduce((n,x)=>n+Number(x.memberCount||0),0),'空间成员关系']])}
+async function run(button,fn){button.disabled=true;try{await fn()}catch(e){toast(e.message,'error');button.disabled=false}}
+function bindCards(root,reload){root.querySelectorAll('.enter').forEach(b=>b.onclick=()=>run(b,async()=>{const r=await request(`/api/instances/${b.dataset.id}/launch`,{method:'POST'});r.location?location.href=r.location:setTimeout(reload,2000)}));root.querySelectorAll('.wake').forEach(b=>b.onclick=()=>run(b,async()=>{await request(`/api/instances/${b.dataset.id}/start`,{method:'POST'});toast('空间正在启动');setTimeout(reload,1800)}));root.querySelectorAll('.sleep').forEach(b=>b.onclick=async()=>{if(await confirmAction('停止这个空间？','空间会进入休眠状态，再次使用时可以随时唤醒。','停止空间',true))run(b,async()=>{await request(`/api/instances/${b.dataset.id}/stop`,{method:'POST'});toast('空间已进入停止流程');await reload()})});root.querySelectorAll('.impersonate').forEach(b=>b.onclick=async()=>{if(await confirmAction('管理员代入访问',`即将访问“${b.dataset.name}”，本次操作会写入审计日志。`,'继续访问'))run(b,async()=>{const r=await request(`/api/admin/instances/${b.dataset.id}/impersonate`,{method:'POST'});location.href=r.location})});root.querySelectorAll('.manage-space').forEach(b=>b.onclick=()=>openSpace(b.dataset.id));root.querySelectorAll('.manage-mcp').forEach(b=>b.onclick=()=>openSpaceMcp(b.dataset.id))}
+async function loadInstances(){userInstances=(await request('/api/instances')).instances;const versions=[...new Set(userInstances.map(x=>x.version).filter(Boolean))];$('#runtime-version').textContent=versions.length===1?`核心 ${versions[0]}`:versions.length>1?`${versions.length} 个核心版本`:'运行核心';renderInstances();schedule(loadInstances,userInstances)}
+async function loadAdminInstances(){if(me.role!=='platform_admin')return;adminInstances=(await request('/api/admin/instances')).instances;renderAdmin();schedule(loadAdminInstances,adminInstances)}
+async function loadMcpServers(){const r=await request('/api/mcp-servers');mcpServers=r.servers;mcpCanManage=r.canManage;$('#mcp-create').classList.toggle('hidden',!mcpCanManage);renderMcpServers()}
+function renderMcpServers(){const q=$('#mcp-search').value.trim().toLowerCase(),status=$('#mcp-filters .active')?.dataset.status||'all',items=mcpServers.filter(x=>(!q||`${x.name} ${x.serverName} ${x.url}`.toLowerCase().includes(q))&&(status==='all'||(status==='enabled')===x.enabled));summary('#mcp-summary',[['MCP 服务',mcpServers.length,'平台登记'],['已启用',mcpServers.filter(x=>x.enabled).length,'可供空间接入'],['空间接入',mcpServers.reduce((n,x)=>n+x.spaceCount,0),'绑定关系'],['敏感配置',mcpServers.filter(x=>x.hasHeaders).length,'请求头已保护']]);$('#mcp-table').innerHTML='<div class="row mcp-row head"><span>MCP 服务</span><span>连接地址</span><span>接入空间</span><span>状态</span><span>操作</span></div>'+(items.length?items.map(x=>`<div class="row mcp-row"><span><strong>${esc(x.name)}</strong><small>${esc(x.serverName)}</small></span><span class="mcp-url">${esc(x.url)}</span><span>${x.spaceCount} 个空间</span><span class="pill ${x.enabled?'':'disabled'}">${x.enabled?'已启用':'已停用'}</span><span class="row-actions"><button class="mcp-spaces" data-id="${x.id}">接入情况</button>${mcpCanManage?`<button class="mcp-edit" data-id="${x.id}">编辑</button>`:''}</span></div>`).join(''):'<div class="empty compact">暂无符合条件的 MCP 服务。</div>');$$('.mcp-edit').forEach(b=>b.onclick=()=>openMcpForm(b.dataset.id));$$('.mcp-spaces').forEach(b=>b.onclick=()=>openMcpSpaces(b.dataset.id))}
+async function loadApiDefinitions(){const r=await request('/api/api-definitions');apiDefinitions=r.definitions;apiCanManage=r.canManage;$('#api-create').classList.toggle('hidden',!apiCanManage);if(apiCanManage&&!apiCatalog.instances.length)apiCatalog=await request('/api/api-catalog');renderApiDefinitions()}
+function renderApiDefinitions(){const q=$('#api-search').value.trim().toLowerCase(),status=$('#api-filters .active')?.dataset.status||'all',names={draft:'草稿',validated:'已校验',published:'已发布',retired:'已下线'},items=apiDefinitions.filter(x=>(!q||`${x.name} ${x.slug} ${x.instanceName}`.toLowerCase().includes(q))&&(status==='all'||x.status===status));summary('#api-summary',[['接口总数',apiDefinitions.length,'当前可管理'],['已发布',apiDefinitions.filter(x=>x.releaseActive).length,'可授权调用'],['累计运行',apiDefinitions.reduce((n,x)=>n+x.runCount,0),'异步 Run'],['失败运行',apiDefinitions.reduce((n,x)=>n+x.failedCount,0),'需要关注']]);$('#api-table').innerHTML='<div class="row api-row head"><span>接口</span><span>所属空间</span><span>状态</span><span>调用情况</span><span>操作</span></div>'+(items.length?items.map(x=>`<div class="row api-row"><span><strong>${esc(x.name)}</strong><small>${esc(x.slug)}${x.releaseVersion?` · v${x.releaseVersion}`:''}</small></span><span><strong>${esc(x.instanceName)}</strong><small>负责人：${esc(x.ownerName)}</small></span><span class="pill ${x.releaseActive?'':'disabled'}">${esc(names[x.status]||x.status)}</span><span>${x.runCount} 次<small>${x.failedCount} 次失败</small></span><span class="row-actions">${apiCanManage&&x.status!=='retired'?`<button class="api-edit" data-id="${x.id}">编辑</button><button class="api-validate" data-id="${x.id}">校验</button><button class="api-publish" data-id="${x.id}">发布</button>`:''}${x.releaseId?`<button class="api-docs" data-id="${x.id}">文档</button>`:''}${x.releaseActive?`<button class="api-credentials" data-id="${x.id}">凭证</button>`:''}<button class="api-runs" data-id="${x.id}">运行记录</button>${apiCanManage&&x.releaseActive?`<button class="api-retire" data-id="${x.id}">下线</button>`:''}</span></div>`).join(''):'<div class="empty compact">暂无符合条件的接口。</div>');$$('.api-edit').forEach(b=>b.onclick=()=>openApiForm(b.dataset.id));$$('.api-validate').forEach(b=>b.onclick=()=>changeApiState(b,'validate'));$$('.api-publish').forEach(b=>b.onclick=()=>changeApiState(b,'publish'));$$('.api-docs').forEach(b=>b.onclick=()=>openApiDocs(b.dataset.id));$$('.api-credentials').forEach(b=>b.onclick=()=>openApiCredentials(b.dataset.id));$$('.api-runs').forEach(b=>b.onclick=()=>openApiRuns(b.dataset.id));$$('.api-retire').forEach(b=>b.onclick=()=>retireApi(b))}
+function syncApiOwners(){const f=$('#api-form'),members=apiCatalog.members?.[f.elements.instanceId.value]||[];f.elements.ownerUserId.innerHTML=members.map(x=>`<option value="${x.id}">${esc(x.displayName)}（${esc(x.accessRole)}）</option>`).join('')}
+async function openApiForm(id){if(!apiCanManage)return;const item=apiDefinitions.find(x=>x.id===id),f=$('#api-form'),m=item?.draftManifest||{};f.reset();f.dataset.id=id||'';$('#api-dialog-title').textContent=item?'编辑接口':'新增接口';$('#api-ai-helper').classList.toggle('hidden',!!item);if(!item){$('#api-ai-requirement').value='我想创建一个接口，用于【描述业务目标】。调用时需要传入【输入信息】，希望返回【输出结果】。请结合当前空间已有的 Skill、MCP 和工具能力设计。';$('#api-ai-status').textContent='AI 只生成建议，不会自动保存或发布。'}f.elements.instanceId.innerHTML=apiCatalog.instances.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');f.elements.instanceId.value=item?.instanceId||apiCatalog.instances[0]?.id||'';syncApiOwners();if(item){f.elements.name.value=item.name;f.elements.slug.value=item.slug;f.elements.description.value=item.description||'';f.elements.ownerUserId.value=item.ownerUserId}f.elements.instruction.value=m.instruction||'';f.elements.inputSchema.value=JSON.stringify(m.inputSchema||{type:'object',properties:{}},null,2);f.elements.outputSchema.value=JSON.stringify(m.outputSchema||{type:'object',properties:{}},null,2);for(const k of ['maxConcurrency','maxQueueSize','queueTimeoutSeconds','executionTimeoutSeconds'])if(m[k]!=null)f.elements[k].value=m[k];f.querySelector('.form-message').textContent='';$('#api-dialog').showModal()}
+async function generateApiSuggestion(){const f=$('#api-form'),button=$('#api-ai-generate'),status=$('#api-ai-status'),requirement=$('#api-ai-requirement').value.trim(),instanceId=f.elements.instanceId.value;if(requirement.length<10)return toast('请先补充接口业务需求','error');button.disabled=true;button.textContent='AI 正在设计…';status.textContent='正在调用所选空间的模型，通常需要几秒钟。';try{const {suggestion}=await request('/api/api-builder/generate',{method:'POST',body:JSON.stringify({instanceId,requirement})});for(const key of ['name','slug','description','instruction','maxConcurrency','maxQueueSize','queueTimeoutSeconds','executionTimeoutSeconds'])if(suggestion[key]!=null)f.elements[key].value=suggestion[key];f.elements.inputSchema.value=JSON.stringify(suggestion.inputSchema,null,2);f.elements.outputSchema.value=JSON.stringify(suggestion.outputSchema,null,2);status.textContent='已回填 AI 建议。请检查并修改后再保存草稿。';toast('AI 已生成接口草稿建议')}catch(error){status.textContent=error.message;toast(error.message,'error')}finally{button.disabled=false;button.textContent='✦ AI 帮你生成'}}
+async function changeApiState(button,action){await run(button,async()=>{await request(`/api/api-definitions/${button.dataset.id}/${action}`,{method:'POST'});toast(action==='validate'?'接口校验通过':'接口已发布并生成文档');await loadApiDefinitions()})}
+async function openApiDocs(id){const item=apiDefinitions.find(x=>x.id===id);$('#api-doc-name').textContent=item?.name||'接口文档';$('#api-doc-content').textContent='正在读取文档…';$('#api-doc-dialog').showModal();try{const r=await request(`/api/api-definitions/${id}/documentation`),content=$('#api-doc-content');content.dataset.markdown=r.release.documentation.markdown;content.dataset.openapi=JSON.stringify(r.release.documentation.openapi,null,2);showApiDoc('markdown')}catch(e){$('#api-doc-content').textContent=e.message}}
+function showApiDoc(type){const content=$('#api-doc-content');content.dataset.current=type;content.textContent=content.dataset[type]||'';$('#api-doc-markdown').classList.toggle('active',type==='markdown');$('#api-doc-openapi').classList.toggle('active',type==='openapi')}
+async function openApiCredentials(id){selectedApi=apiDefinitions.find(x=>x.id===id);if(!selectedApi)return;$('#api-credential-name').textContent=`${selectedApi.name} · ${selectedApi.instanceName}`;$('#api-secret-once').classList.add('hidden');$('#api-credential-form').reset();$('#api-credential-form').elements.maxConcurrency.value=1;$('#api-credential-dialog').showModal();await renderApiCredentials()}
+async function renderApiCredentials(){try{const credentials=(await request(`/api/instances/${selectedApi.instanceId}/api-credentials`)).credentials;$('#api-credential-list').innerHTML=credentials.length?credentials.map(x=>{const granted=x.grants.some(g=>g.definitionId===selectedApi.id);return `<div class="mcp-space-row"><span><strong>${esc(x.name)}</strong><small>${esc(x.keyPrefix)}… · 并发 ${x.maxConcurrency}</small></span><span class="pill ${x.enabled&&granted?'':'disabled'}">${!x.enabled?'已停用':granted?'已授权':'未授权'}</span><span class="row-actions"><button class="${granted?'secondary api-revoke':'primary api-grant'}" data-id="${x.id}" ${x.enabled?'':'disabled'}>${granted?'撤销':'授权'}</button><button class="api-toggle-credential" data-id="${x.id}" data-enabled="${x.enabled}" data-concurrency="${x.maxConcurrency}">${x.enabled?'停用':'启用'}</button></span></div>`}).join(''):'<div class="empty compact">尚未创建接口凭证。</div>';$$('.api-grant,.api-revoke').forEach(b=>b.onclick=()=>setApiGrant(b,!b.classList.contains('api-revoke')));$$('.api-toggle-credential').forEach(b=>b.onclick=()=>toggleApiCredential(b))}catch(e){$('#api-credential-list').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
+async function setApiGrant(button,enabled){await run(button,async()=>{await request(`/api/instances/${selectedApi.instanceId}/api-credentials/${button.dataset.id}/grants`,{method:'PUT',body:JSON.stringify({apiDefinitionId:selectedApi.id,enabled})});toast(enabled?'凭证已授权':'凭证授权已撤销');await renderApiCredentials()})}
+async function toggleApiCredential(button){const enabled=button.dataset.enabled!=='true';if(!enabled&&!await confirmAction('停用这个接口凭证？','使用该 API Key 的外围系统将立即无法发起新调用。','停用凭证',true))return;await run(button,async()=>{await request(`/api/instances/${selectedApi.instanceId}/api-credentials/${button.dataset.id}`,{method:'PATCH',body:JSON.stringify({enabled,maxConcurrency:Number(button.dataset.concurrency)})});toast(enabled?'凭证已启用':'凭证已停用');await renderApiCredentials()})}
+async function retireApi(button){const item=apiDefinitions.find(x=>x.id===button.dataset.id);if(!await confirmAction('下线这个接口？',`“${item.name}”下线后，现有 API Key 将不能再发起新调用，历史文档和运行记录仍会保留。`,'下线接口',true))return;await run(button,async()=>{await request(`/api/api-definitions/${item.id}/retire`,{method:'POST'});toast('接口已下线');await loadApiDefinitions()})}
+async function openApiRuns(id){const item=apiDefinitions.find(x=>x.id===id);$('#api-runs-name').textContent=item?.name||'运行记录';$('#api-runs-list').innerHTML='<div class="loading">正在读取运行记录…</div>';$('#api-run-events').classList.add('hidden');$('#api-runs-dialog').showModal();try{const runs=(await request(`/api/api-definitions/${id}/runs`)).runs;$('#api-runs-list').innerHTML=runs.length?runs.map(x=>`<div class="mcp-space-row"><span><strong>${esc(x.status)}</strong><small>${new Date(x.queuedAt).toLocaleString()} · ${esc(x.credentialName||x.keyPrefix||'')}</small></span><span>${x.completedAt?new Date(x.completedAt).toLocaleTimeString():'执行中'}</span><button class="api-run-detail" data-id="${x.id}">事件</button></div>`).join(''):'<div class="empty compact">暂无运行记录。</div>';$$('.api-run-detail').forEach(b=>b.onclick=()=>openApiRunEvents(b.dataset.id))}catch(e){$('#api-runs-list').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
+async function openApiRunEvents(id){const root=$('#api-run-events');root.classList.remove('hidden');root.innerHTML='<div class="loading">正在读取事件…</div>';try{const events=(await request(`/api/api-runs/${id}/events`)).events;root.innerHTML=events.map(x=>`<div class="audit-item"><div><strong>${esc(x.eventType)}</strong><time>#${x.sequence} · ${new Date(x.createdAt).toLocaleTimeString()}</time></div><p>${esc(JSON.stringify(x.data))}</p></div>`).join('')||'<div class="empty compact">暂无事件。</div>'}catch(e){root.innerHTML=`<div class="error">${esc(e.message)}</div>`}}
+function openMcpForm(id){const item=mcpServers.find(x=>x.id===id),f=$('#mcp-form');f.reset();f.dataset.id=id||'';$('#mcp-dialog-title').textContent=item?'编辑 MCP':'新增 MCP';if(item){f.elements.name.value=item.name;f.elements.serverName.value=item.serverName;f.elements.url.value=item.url;f.elements.description.value=item.description||'';f.elements.headers.value='';f.elements.headers.placeholder=item.hasHeaders?'已保存敏感请求头；留空则保持不变':'{"Authorization":"Bearer ..."}';f.elements.enabled.checked=item.enabled}else f.elements.enabled.checked=true;f.querySelector('.form-message').textContent='';$('#mcp-dialog').showModal()}
+async function openMcpSpaces(id){const item=mcpServers.find(x=>x.id===id);$('#mcp-spaces-name').textContent=item?.name||'MCP';$('#mcp-space-list').innerHTML='<div class="loading">正在读取接入情况…</div>';$('#mcp-spaces-dialog').showModal();try{const r=await request(`/api/mcp-servers/${id}/spaces`);$('#mcp-space-list').innerHTML=r.spaces.length?r.spaces.map(x=>`<div class="mcp-space-row"><span><strong>${esc(x.name)}</strong><small>${esc(x.tenant)} · 核心 ${esc(x.version)}</small></span><span class="status ${esc(x.status)}">${esc(statusName[x.status]||x.status)}</span><time>${new Date(x.connectedAt).toLocaleString()}</time></div>`).join(''):'<div class="empty compact">尚未有空间接入。</div>'}catch(e){$('#mcp-space-list').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
+async function openSpaceMcp(id){if(!mcpServers.length)await loadMcpServers();selectedSpace=[...adminInstances,...userInstances].find(x=>x.id===id);if(!selectedSpace)return;$('#space-mcp-name').textContent=selectedSpace.name;$('#space-mcp-list').innerHTML='<div class="loading">正在读取空间配置…</div>';$('#space-mcp-dialog').showModal();await renderSpaceMcp()}
+async function renderSpaceMcp(){try{const current=(await request(`/api/instances/${selectedSpace.id}/mcp-bindings`)).bindings,ids=new Set(current.map(x=>x.id)),available=mcpServers.filter(x=>x.enabled||ids.has(x.id));$('#space-mcp-list').innerHTML=available.length?available.map(x=>`<div class="mcp-space-row"><span><strong>${esc(x.name)}</strong><small>${esc(x.serverName)} · ${esc(x.url)}</small></span><span class="pill ${ids.has(x.id)?'':'disabled'}">${ids.has(x.id)?'已接入':'未接入'}</span><button class="${ids.has(x.id)?'secondary disconnect-mcp':'primary connect-mcp'}" data-id="${x.id}">${ids.has(x.id)?'取消接入':'接入空间'}</button></div>`).join(''):'<div class="empty compact">暂无可接入的 MCP 服务。</div>';$$('.connect-mcp').forEach(b=>b.onclick=()=>changeSpaceMcp(b,true));$$('.disconnect-mcp').forEach(b=>b.onclick=()=>changeSpaceMcp(b,false))}catch(e){$('#space-mcp-list').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
+async function changeSpaceMcp(button,connect){button.disabled=true;button.textContent='应用中…';try{await request(`/api/instances/${selectedSpace.id}/mcp-bindings${connect?'':`/${button.dataset.id}`}`,{method:connect?'PUT':'DELETE',...(connect?{body:JSON.stringify({mcpServerId:button.dataset.id})}:{})});toast(connect?'MCP 已接入，空间已恢复':'MCP 已移除，空间已恢复');await Promise.all([loadMcpServers(),renderSpaceMcp(),loadInstances(),loadAdminInstances()])}catch(e){toast(e.message,'error');await renderSpaceMcp()}}
+async function loadAdminAudit(offset=0){adminAuditOffset=Math.max(offset,0);const r=await request(`/api/admin/audit-logs?limit=${adminAuditPageSize}&offset=${adminAuditOffset}`);$('#audit-table').innerHTML=r.logs.length?'<div class="row head"><span>时间</span><span>操作</span><span>目标</span></div>'+r.logs.map(x=>`<div class="row"><span>${new Date(x.createdAt).toLocaleString()}</span><span>${esc(x.actor)} · ${esc(actionNames[x.action]||x.action)}</span><span>${esc(x.targetInstance||'')} ${esc(x.targetUser||'')}</span></div>`).join(''):'<div class="empty compact">暂无管理员操作记录。</div>';$('#admin-audit-page').textContent=`${Math.floor(adminAuditOffset/adminAuditPageSize)+1} / ${Math.max(Math.ceil(r.total/adminAuditPageSize),1)} 页 · 共 ${r.total} 条`;$('#admin-audit-prev').disabled=!adminAuditOffset;$('#admin-audit-next').disabled=adminAuditOffset+adminAuditPageSize>=r.total}
+async function loadOverview(){if(me.role!=='platform_admin')return;overview=await request('/api/admin/overview');const opts=overview.tenants.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');$('#user-form select[name=tenantId]').innerHTML=opts;$('#instance-form select[name=tenantId]').innerHTML=opts;$('#user-tenant-filter').innerHTML='<option value="all">全部租户</option>'+opts;$('#dsh-version-select').innerHTML=(overview.versions||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.id)}</option>`).join('');$('#user-status-filter').options[1].value='true';$('#user-status-filter').options[2].value='false';summary('#identity-summary',[['用户总数',overview.users.length,'平台身份'],['已启用',overview.users.filter(x=>x.enabled).length,'可正常登录'],['租户数',overview.tenants.length,'组织边界'],['管理员',overview.users.filter(x=>x.role!=='member').length,'平台与租户管理员']]);renderUsers();renderTenants()}
+function renderUsers(){const q=$('#user-search').value.trim().toLowerCase(),tenant=$('#user-tenant-filter').value,role=$('#user-role-filter').value,status=$('#user-status-filter').value,users=overview.users.filter(x=>(!q||`${x.displayName} ${x.username} ${x.tenantName||''}`.toLowerCase().includes(q))&&(tenant==='all'||x.tenantId===tenant)&&(role==='all'||x.role===role)&&(status==='all'||String(x.enabled)===status));$('#user-table').innerHTML='<div class="row user-row head"><span>用户</span><span>所属租户</span><span>角色</span><span>状态</span><span>操作</span></div>'+(users.length?users.map(x=>`<div class="row user-row"><span><strong>${esc(x.displayName)}</strong><small>${esc(x.username)}</small></span><span>${esc(x.tenantName||'-')}</span><span class="pill">${esc(roleName(x.role))}</span><span class="pill ${x.enabled?'':'disabled'}">${x.enabled?'已启用':'已停用'}</span><span class="row-actions"><button class="user-audit" data-id="${x.id}">审计</button>${x.role==='platform_admin'?'':`<button class="user-edit" data-id="${x.id}">编辑</button><button class="user-password" data-id="${x.id}">初始化密码</button>`}</span></div>`).join(''):'<div class="empty compact">没有符合条件的用户。</div>');bindUsers()}
+function renderTenants(){$('#tenant-table').innerHTML='<div class="row tenant-row head"><span>租户</span><span>编码</span><span>成员数</span></div>'+overview.tenants.map(x=>`<div class="row tenant-row"><strong>${esc(x.name)}</strong><span>${esc(x.code)}</span><span>${overview.users.filter(u=>u.tenantId===x.id).length}</span></div>`).join('')}
+function sleepOptions(selected){return [['never','永不休眠'],[30,'空闲 30 分钟'],[60,'空闲 1 小时'],[120,'空闲 2 小时'],[240,'空闲 4 小时'],[480,'空闲 8 小时']].map(([v,l])=>`<option value="${v}" ${String(selected??'never')===String(v)?'selected':''}>${l}</option>`).join('')}
+async function openSpace(id){if(!overview.users.length)await loadOverview();selectedSpace=adminInstances.find(x=>x.id===id);if(!selectedSpace)return;const f=$('#space-settings-form');f.elements.name.value=selectedSpace.name;f.elements.idleTimeoutMinutes.innerHTML=sleepOptions(selectedSpace.idleTimeoutMinutes);$('#space-dialog-name').textContent=selectedSpace.name;$('#space-settings-message').textContent='';$('#space-member-form select[name=userId]').innerHTML=overview.users.filter(x=>x.role!=='platform_admin'&&x.tenantId===selectedSpace.tenantId).map(x=>`<option value="${x.id}">${esc(x.displayName)}（${esc(x.username)}）</option>`).join('');await loadMembers();$('#space-dialog').showModal()}
+async function loadMembers(){spaceMembers=(await request(`/api/admin/instances/${selectedSpace.id}/members`)).members;$('#space-member-list').innerHTML=spaceMembers.length?spaceMembers.map(x=>`<div class="member-row"><span><strong>${esc(x.displayName)}</strong><small>${esc(x.username)}</small></span><span class="pill">${accessName[x.accessRole]}</span>${x.accessRole==='owner'?'<span></span>':`<button class="remove-member" data-id="${x.id}">移除</button>`}</div>`).join(''):'<div class="empty compact">尚未绑定成员。</div>';$$('#space-member-list .remove-member').forEach(b=>b.onclick=async()=>{if(await confirmAction('移除空间成员？','该用户将立即失去此空间的访问权限。','移除',true)){await request(`/api/admin/instances/${selectedSpace.id}/members/${b.dataset.id}`,{method:'DELETE'});await Promise.all([loadMembers(),loadAdminInstances()]);toast('成员已移除')}});const s=$('#space-member-form select[name=userId]'),sync=()=>{$('#space-member-form select[name=accessRole]').value=spaceMembers.find(x=>x.id===s.value)?.accessRole||'member'};s.onchange=sync;sync()}
+function bindUsers(){$$('#user-table .user-audit').forEach(b=>b.onclick=()=>openAudit(b.dataset.id));$$('#user-table .user-edit').forEach(b=>b.onclick=()=>openEdit(b.dataset.id));$$('#user-table .user-password').forEach(b=>b.onclick=()=>resetPassword(b.dataset.id))}
+function openEdit(id){const u=overview.users.find(x=>x.id===id),f=$('#edit-user-form');f.dataset.id=id;f.elements.displayName.value=u.displayName;f.elements.role.value=u.role;f.elements.tenantId.innerHTML=overview.tenants.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');f.elements.tenantId.value=u.tenantId;f.elements.enabled.checked=u.enabled;f.elements.mcpAdmin.checked=u.mcpAdmin;f.elements.apiAdmin.checked=u.apiAdmin;$('#edit-user-name').textContent=u.username;$('#edit-user-message').textContent='';$('#edit-user-dialog').showModal()}
+async function openAudit(id,offset=0){auditUser=overview.users.find(x=>x.id===id);auditOffset=Math.max(offset,0);$('#audit-user-name').textContent=`${auditUser.displayName}（${auditUser.username}）`;if(!$('#user-audit-dialog').open)$('#user-audit-dialog').showModal();try{const r=await request(`/api/admin/users/${id}/audit-logs?limit=${pageSize}&offset=${auditOffset}`);$('#user-audit-table').innerHTML=r.logs.length?r.logs.map(x=>`<div class="audit-item"><div><strong>${esc(actionNames[x.action]||x.action)}</strong><time>${new Date(x.createdAt).toLocaleString()}</time></div><p>${esc(x.details?.path||[x.targetInstance,x.targetUser].filter(Boolean).join(' · ')||'-')}</p><small>操作人：${esc(x.actor)}</small></div>`).join(''):'<div class="empty compact">暂无审计记录。</div>';$('#audit-page').textContent=`${Math.floor(auditOffset/pageSize)+1} / ${Math.max(Math.ceil(r.total/pageSize),1)} 页 · 共 ${r.total} 条`;$('#audit-prev').disabled=!auditOffset;$('#audit-next').disabled=auditOffset+pageSize>=r.total}catch(e){$('#user-audit-table').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
+async function resetPassword(id){const u=overview.users.find(x=>x.id===id);if(!await confirmAction('初始化登录密码？',`${u.displayName}（${u.username}）的全部登录会话会立即失效。`,'初始化密码',true))return;try{const r=await request(`/api/admin/users/${id}/reset-password`,{method:'POST'});$('#password-user-name').textContent=u.displayName;$('#temporary-password').textContent=r.temporaryPassword;$('#copy-password').textContent='复制密码';$('#password-dialog').showModal()}catch(e){toast(e.message,'error')}}
+async function submitForm(form,path,dialog){const m=form.querySelector('.form-message'),b=form.querySelector('button[type=submit]');m.textContent='';b.disabled=true;try{await request(path,{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(form)))});form.reset();dialog?.close();toast('操作成功');await Promise.all([loadOverview(),loadInstances(),loadAdminInstances()])}catch(e){m.textContent=e.message}finally{b.disabled=false}}
+function tab(name){$$('.tab').forEach(x=>x.classList.toggle('active',x.dataset.tab===name));$$('.tab-body').forEach(x=>x.classList.toggle('hidden',x.id!==`${name}-tab`))}
+function openCreateSpace(){navigate('users');tab('allocate')}
+async function navigate(view){clearTimeout(poll);$$('.nav').forEach(x=>x.classList.toggle('active',x.dataset.view===view));$$('.view').forEach(x=>x.classList.toggle('hidden',x.id!==`${view}-view`));$('#breadcrumb-page').textContent=({instances:'我的工作空间','instance-admin':'空间管理',users:'用户与租户',mcp:'MCP 管理','api-management':'接口管理',audit:'审计与合规'})[view];document.body.classList.remove('nav-open');if(view==='instances')await loadInstances();if(view==='instance-admin')await Promise.all([loadOverview(),loadAdminInstances()]);if(view==='users')await loadOverview();if(view==='mcp')await loadMcpServers();if(view==='api-management')await loadApiDefinitions();if(view==='audit')await loadAdminAudit(0)}
+$('#login-form').onsubmit=async e=>{e.preventDefault();$('#login-error').textContent='';try{const r=await request('/api/login',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});me=r.user;showApp()}catch(x){$('#login-error').textContent=x.message}}
+$('#logout').onclick=async()=>{await request('/api/logout',{method:'POST'});showLogin()};$('#refresh').onclick=loadInstances;$('#admin-refresh').onclick=loadAdminInstances;$('#top-refresh').onclick=()=>navigate($('.nav.active')?.dataset.view||'instances',$('.nav.active')?.dataset.focus);$('#mobile-menu').onclick=()=>document.body.classList.toggle('nav-open')
+$('#quick-create-user').onclick=()=>$('#create-user-dialog').showModal();$('#quick-create-tenant').onclick=()=>$('#create-tenant-dialog').showModal();$('#quick-create-space').onclick=openCreateSpace
+$('#user-form').onsubmit=e=>{e.preventDefault();submitForm(e.target,'/api/admin/users',$('#create-user-dialog'))};$('#tenant-form').onsubmit=e=>{e.preventDefault();submitForm(e.target,'/api/admin/tenants',$('#create-tenant-dialog'))};$('#instance-form').onsubmit=e=>{e.preventDefault();submitForm(e.target,'/api/admin/instances')}
+$('#space-settings-form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit]');b.disabled=true;try{selectedSpace=(await request(`/api/admin/instances/${selectedSpace.id}`,{method:'PATCH',body:JSON.stringify(Object.fromEntries(new FormData(f)))})).instance;await loadAdminInstances();$('#space-dialog-name').textContent=selectedSpace.name;$('#space-settings-message').textContent='设置已保存并立即生效';toast('空间设置已保存')}catch(x){toast(x.message,'error')}finally{b.disabled=false}}
+$('#space-member-form').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button[type=submit]')||e.target.querySelector('button');if(b)b.disabled=true;try{await request(`/api/admin/instances/${selectedSpace.id}/members`,{method:'PUT',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});await Promise.all([loadMembers(),loadAdminInstances(),loadInstances()]);toast('成员权限已更新')}catch(x){toast(x.message,'error')}finally{if(b)b.disabled=false}}
+$('#edit-user-form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit]');b.disabled=true;try{const body=Object.fromEntries(new FormData(f));body.enabled=f.elements.enabled.checked;body.mcpAdmin=f.elements.mcpAdmin.checked;body.apiAdmin=f.elements.apiAdmin.checked;await request(`/api/admin/users/${f.dataset.id}`,{method:'PATCH',body:JSON.stringify(body)});$('#edit-user-dialog').close();await loadOverview();toast('用户信息已更新')}catch(x){$('#edit-user-message').textContent=x.message}finally{b.disabled=false}}
+$('#mcp-form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit]'),id=f.dataset.id;f.querySelector('.form-message').textContent='';b.disabled=true;try{const body=Object.fromEntries(new FormData(f));body.enabled=f.elements.enabled.checked;if(id&&!body.headers.trim())delete body.headers;await request(id?`/api/mcp-servers/${id}`:'/api/mcp-servers',{method:id?'PATCH':'POST',body:JSON.stringify(body)});$('#mcp-dialog').close();await loadMcpServers();toast(id?'MCP 已更新':'MCP 已新增')}catch(x){f.querySelector('.form-message').textContent=x.message}finally{b.disabled=false}}
+$('#api-form').elements.instanceId.onchange=syncApiOwners
+$('#api-ai-generate').onclick=generateApiSuggestion
+$('#api-form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit]'),id=f.dataset.id;b.disabled=true;f.querySelector('.form-message').textContent='';try{const body=Object.fromEntries(new FormData(f));await request(id?`/api/api-definitions/${id}`:'/api/api-definitions',{method:id?'PATCH':'POST',body:JSON.stringify(body)});$('#api-dialog').close();await loadApiDefinitions();toast(id?'接口草稿已更新':'接口草稿已创建')}catch(x){f.querySelector('.form-message').textContent=x.message}finally{b.disabled=false}}
+$('#api-credential-form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit]');b.disabled=true;try{const created=await request(`/api/instances/${selectedApi.instanceId}/api-credentials`,{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(f)))});await request(`/api/instances/${selectedApi.instanceId}/api-credentials/${created.credential.id}/grants`,{method:'PUT',body:JSON.stringify({apiDefinitionId:selectedApi.id,enabled:true})});$('#api-secret-once code').textContent=created.secret;$('#api-secret-once').classList.remove('hidden');f.reset();f.elements.maxConcurrency.value=1;await renderApiCredentials();toast('凭证已创建并授权')}catch(x){toast(x.message,'error')}finally{b.disabled=false}}
+$$('[data-close-dialog]').forEach(b=>b.onclick=()=>b.closest('dialog').close());$('#audit-prev').onclick=()=>openAudit(auditUser.id,auditOffset-pageSize);$('#audit-next').onclick=()=>openAudit(auditUser.id,auditOffset+pageSize);$('#admin-audit-prev').onclick=()=>loadAdminAudit(adminAuditOffset-adminAuditPageSize);$('#admin-audit-next').onclick=()=>loadAdminAudit(adminAuditOffset+adminAuditPageSize);$('#admin-audit-page-size').onchange=e=>{adminAuditPageSize=Number(e.target.value);loadAdminAudit(0)};$('#audit-refresh').onclick=()=>loadAdminAudit(adminAuditOffset);$('#copy-password').onclick=async()=>{await navigator.clipboard.writeText($('#temporary-password').textContent);$('#copy-password').textContent='已复制'}
+$$('.nav').forEach(b=>b.onclick=()=>navigate(b.dataset.view,b.dataset.focus));$$('.tab').forEach(b=>b.onclick=()=>tab(b.dataset.tab));$$('#instance-filters button, #admin-instance-filters button').forEach(b=>b.onclick=()=>{[...b.parentElement.children].forEach(x=>x.classList.remove('active'));b.classList.add('active');b.closest('.view').id==='instances-view'?renderInstances():renderAdmin()});$$('#mcp-filters button').forEach(b=>b.onclick=()=>{[...b.parentElement.children].forEach(x=>x.classList.remove('active'));b.classList.add('active');renderMcpServers()})
+$$('#api-filters button').forEach(b=>b.onclick=()=>{[...b.parentElement.children].forEach(x=>x.classList.remove('active'));b.classList.add('active');renderApiDefinitions()})
+$('#mcp-create').onclick=()=>openMcpForm();$('#mcp-refresh').onclick=loadMcpServers;$('#api-create').onclick=()=>openApiForm();$('#api-refresh').onclick=loadApiDefinitions;$('#api-doc-markdown').onclick=()=>showApiDoc('markdown');$('#api-doc-openapi').onclick=()=>showApiDoc('openapi');$('#api-copy-doc').onclick=async()=>{const content=$('#api-doc-content');await navigator.clipboard.writeText(content.dataset[content.dataset.current]||'');toast('文档已复制')};$('#instance-search').oninput=renderInstances;$('#admin-instance-search').oninput=renderAdmin;$('#mcp-search').oninput=renderMcpServers;$('#api-search').oninput=renderApiDefinitions;$('#user-search').oninput=renderUsers;$('#user-tenant-filter').onchange=renderUsers;$('#user-role-filter').onchange=renderUsers;$('#user-status-filter').onchange=renderUsers
+try{me=(await request('/api/me')).user;showApp()}catch{showLogin()}

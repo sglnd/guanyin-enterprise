@@ -9,6 +9,7 @@
 - 一个 DSH 空间对应一个 Deployment、Service、Secret 和两块持久卷。
 - 用户与空间是多对多关系，成员角色分为负责人、运维者和成员。
 - 空间可独立配置永不休眠或空闲一段时间后缩容到 0。
+- MCP 管理员可登记 Streamable HTTP MCP；平台管理员、空间负责人和运维者可将已启用 MCP 接入空间，控制面以 ConfigMap/Secret 注入 DSH 并刷新对应空间。
 
 ## 目录
 
@@ -21,13 +22,13 @@ docs/                生产就绪与运维文档
 
 ## 本地构建与部署
 
-当前本机示例使用 ARM64 DSH 镜像 `bankops/deepseek-harness-agent:0.2.9-arm64`。
+当前本机示例使用 ARM64 DSH 镜像 `bankops/deepseek-harness-agent:0.1.5-rc.2-core-arm64`。
 
 ```bash
 docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.5.4 .
 docker save guanyin/control-plane:0.5.4 |
   docker exec -i desktop-control-plane ctr -n k8s.io images import -
-docker save bankops/deepseek-harness-agent:0.2.9-arm64 |
+docker save bankops/deepseek-harness-agent:0.1.5-rc.2-core-arm64 |
   docker exec -i desktop-control-plane ctr -n k8s.io images import -
 
 kubectl apply -f deploy/kubernetes.yaml
