@@ -12,13 +12,17 @@
 .mcp-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 500 10px/1.4 "JetBrains Mono",monospace; }
 .full-span { grid-column: 1/-1; }
 .full-span small { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
-.api-ai-helper { margin: 0 0 22px; padding: 18px; border: 1px solid #dec9aa; border-radius: 12px; background: linear-gradient(135deg,#fbf8f1,#fff); }
+.api-ai-helper { margin: 0 0 24px; padding: 20px; border: 1px solid #dec9aa; border-radius: 14px; background: radial-gradient(circle at 100% 0,#f4e8d4 0,transparent 38%),linear-gradient(135deg,#fbf8f1,#fff); box-shadow: 0 8px 24px rgba(113,80,35,.07); }
+.api-ai-heading { display: flex; align-items: flex-start; gap: 12px; }
+.api-ai-mark { display: grid; place-items: center; flex: 0 0 34px; width: 34px; height: 34px; border-radius: 10px; color: #fff; background: var(--bronze); box-shadow: 0 5px 14px rgba(133,91,35,.22); }
 .api-ai-helper h3 { margin: 5px 0 3px; font-size: 16px; }
 .api-ai-helper p { margin: 0 0 12px; color: var(--muted); font-size: 11px; }
-.api-ai-helper textarea { min-height: 92px; background: rgba(255,255,255,.88); }
+.api-ai-helper textarea { display: block; width: 100%; min-height: 168px; box-sizing: border-box; padding: 15px 16px; border-color: #d8c6aa; background: rgba(255,255,255,.92); font: 12px/1.75 "JetBrains Mono",monospace; resize: vertical; }
+.api-ai-helper textarea:focus { border-color: var(--bronze); box-shadow: 0 0 0 3px rgba(151,105,45,.1); }
 .api-ai-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
 .api-ai-actions span { color: var(--muted); font-size: 10px; }
 .api-ai-actions button { width: auto; flex: 0 0 auto; color: var(--bronze); border-color: #dec9aa; background: #fffaf1; }
+.full-span span em { margin-left: 7px; padding: 2px 6px; border-radius: 10px; color: var(--bronze); background: var(--bronze-soft); font-size: 9px; font-style: normal; font-weight: 600; }
 .mcp-space-row { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(120px,auto); align-items: center; gap: 14px; min-height: 62px; padding: 11px 3px; border-bottom: 1px solid var(--line); font-size: 12px; }
 .mcp-space-row small { display: block; margin-top: 3px; color: var(--muted); }
 .mcp-space-row time { color: var(--muted); font-size: 10px; }
