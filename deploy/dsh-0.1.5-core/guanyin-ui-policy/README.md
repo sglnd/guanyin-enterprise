@@ -4,7 +4,7 @@
 
 ## 文件职责
 
-- `lib/client.js`：运行时界面规则，包括观因品牌、统一顶栏、登录人信息，以及隐藏 Codex UI 扩展管理、专家、技能、插件、连接器、IM 助理、配套管理模块和外部操作入口。
+- `lib/client.js`：运行时界面规则，包括原位替换 DSH 品牌与首页文案、在侧栏设置项下展示登录人和空间信息，以及隐藏 Codex UI 扩展管理、专家、技能、插件、连接器、IM 助理、配套管理模块和外部操作入口。
 - `build-policy.json`：构建期界面发布规则。`hostOnlyPackages` 中的插件只加载 DSH 宿主能力，不向浏览器发布自己的管理页面。
 - `cordis.patch.yml`：把 UI Policy 客户端加载到 Web profile。
 - `package.json`：UI Policy 插件声明。

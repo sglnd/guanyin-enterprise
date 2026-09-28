@@ -98,6 +98,11 @@ window.__ModuleLoader__.load({
       return brandReplacements.reduce((text, [pattern, replacement]) => text.replace(pattern, replacement), String(value || ''))
     }
 
+    function matching(root, selector) {
+      const matches = root.nodeType === Node.ELEMENT_NODE && root.matches?.(selector) ? [root] : []
+      return matches.concat([...root.querySelectorAll(selector)])
+    }
+
     function applyBranding(root) {
       document.title = branded(document.title || '观因工作空间')
       if (!document.title.includes('观因')) document.title = `观因工作空间 · ${document.title}`
@@ -116,19 +121,30 @@ window.__ModuleLoader__.load({
       const nodes = []
       while (walker.nextNode()) nodes.push(walker.currentNode)
       nodes.forEach((node) => {
-        if (node.parentElement?.closest('script,style,pre,code,textarea,[data-guanyin-shell]')) return
+        if (node.parentElement?.closest('script,style,pre,code,textarea,[data-guanyin-managed]')) return
         const next = branded(node.nodeValue)
         if (next !== node.nodeValue) node.nodeValue = next
       })
 
       root.querySelectorAll('[title],[aria-label],[alt]').forEach((element) => {
-        if (element.closest('[data-guanyin-shell]')) return
+        if (element.closest('[data-guanyin-managed]')) return
         for (const attribute of ['title', 'aria-label', 'alt']) {
           if (!element.hasAttribute(attribute)) continue
           const value = element.getAttribute(attribute)
           const next = branded(value)
           if (next !== value) element.setAttribute(attribute, next)
         }
+      })
+
+      matching(root, '.dcu-brand').forEach((brand) => {
+        if (brand.dataset.guanyinBrand === 'true') return
+        brand.dataset.guanyinBrand = 'true'
+        brand.setAttribute('aria-label', '观因 · 新建任务')
+        brand.innerHTML = '<img src="/__guanyin/brand/logo.png" alt=""><strong>观因</strong>'
+      })
+
+      matching(root, '[class*="_titleGroup"] > span:first-child').forEach((title) => {
+        if (textOf(title) === '探索未至之境') title.textContent = '让智能，安全服务每个团队。'
       })
     }
 
@@ -137,43 +153,43 @@ window.__ModuleLoader__.load({
       const style = document.createElement('style')
       style.id = 'guanyin-brand-styles'
       style.textContent = `
-        :root { --guanyin-ink:#282622; --guanyin-paper:#f7f4ed; --guanyin-line:#ded8cc; --guanyin-red:#aa3b2d; --guanyin-green:#376c64; }
-        body { padding-top: 52px !important; }
-        .guanyin-shell { position:fixed; z-index:2147483000; inset:0 0 auto; height:52px; display:flex; align-items:center; gap:14px; box-sizing:border-box; padding:0 18px; color:var(--guanyin-ink); background:rgba(247,244,237,.96); border-bottom:1px solid var(--guanyin-line); box-shadow:0 3px 14px rgba(40,38,34,.08); backdrop-filter:blur(12px); font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif; }
-        .guanyin-shell__brand { display:flex; align-items:center; gap:9px; min-width:0; color:inherit; text-decoration:none; }
-        .guanyin-shell__brand img { width:29px; height:29px; object-fit:contain; }
-        .guanyin-shell__brand strong { font-size:14px; letter-spacing:.08em; white-space:nowrap; }
-        .guanyin-shell__space { overflow:hidden; padding-left:14px; border-left:1px solid var(--guanyin-line); color:#6f6a61; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
-        .guanyin-shell__identity { display:flex; align-items:center; gap:9px; margin-left:auto; min-width:0; }
-        .guanyin-shell__avatar { display:grid; place-items:center; width:28px; height:28px; border-radius:9px; color:#fff; background:var(--guanyin-green); font-size:12px; font-weight:700; }
-        .guanyin-shell__user { display:flex; flex-direction:column; min-width:0; line-height:1.25; }
-        .guanyin-shell__user strong { max-width:180px; overflow:hidden; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
-        .guanyin-shell__user small { max-width:240px; overflow:hidden; color:#777168; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
-        .guanyin-shell__back { padding:6px 10px; border:1px solid var(--guanyin-line); border-radius:8px; color:var(--guanyin-ink); background:#fff; font-size:11px; text-decoration:none; white-space:nowrap; }
-        .guanyin-shell--impersonated { border-bottom-color:#d7a59d; background:rgba(255,242,239,.97); }
-        .guanyin-shell__warning { padding:4px 8px; border-radius:999px; color:#8d2d22; background:#f5d9d4; font-size:10px; font-weight:700; white-space:nowrap; }
-        @media (max-width:720px) { .guanyin-shell__space,.guanyin-shell__user small { display:none; } .guanyin-shell { padding:0 10px; gap:8px; } .guanyin-shell__brand strong { font-size:13px; } }
+        .dcu-brand[data-guanyin-brand=true] { gap:9px; color:var(--dcu-sidebar-primary); }
+        .dcu-brand[data-guanyin-brand=true] img { flex:none; width:25px; height:25px; object-fit:contain; }
+        .dcu-brand[data-guanyin-brand=true] strong { overflow:hidden; font-size:18px; line-height:24px; font-weight:650; letter-spacing:.08em; text-overflow:ellipsis; white-space:nowrap; }
+        .dcu-guanyin-identity { display:grid; grid-template-columns:30px minmax(0,1fr); gap:9px; align-items:center; margin:0 8px 8px; padding:10px 4px 2px; border-top:1px solid var(--dcu-sidebar-border); color:var(--dcu-sidebar-primary); }
+        .dcu-guanyin-avatar { display:grid; place-items:center; width:30px; height:30px; border-radius:9px; color:#fff; background:#376c64; font-size:12px; font-weight:700; }
+        .dcu-guanyin-copy { display:flex; flex-direction:column; min-width:0; line-height:1.35; }
+        .dcu-guanyin-copy strong,.dcu-guanyin-copy small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .dcu-guanyin-copy strong { font-size:12px; font-weight:600; }
+        .dcu-guanyin-copy small { color:var(--dcu-sidebar-secondary); font-size:10px; }
+        .dcu-guanyin-impersonated { color:#d66b5d!important; }
+        .dcu-root.dcu-compact .dcu-brand[data-guanyin-brand=true] strong,.dcu-root.dcu-compact .dcu-guanyin-copy { display:none; }
+        .dcu-root.dcu-compact .dcu-guanyin-identity { grid-template-columns:30px; justify-content:center; margin-inline:5px; padding-inline:0; }
       `
       document.head.append(style)
     }
 
-    function renderIdentityShell() {
+    function renderIdentityFooter() {
       installBrandStyles()
-      let shell = document.querySelector('[data-guanyin-shell]')
-      if (!shell) {
-        shell = document.createElement('header')
-        shell.dataset.guanyinShell = 'true'
-        document.body.prepend(shell)
+      document.querySelector('[data-guanyin-shell]')?.remove()
+      const footer = document.querySelector('.dcu-foot')
+      if (!footer) return
+      let panel = footer.querySelector('[data-guanyin-identity]')
+      if (!panel) {
+        panel = document.createElement('div')
+        panel.dataset.guanyinIdentity = 'true'
+        panel.dataset.guanyinManaged = 'true'
+        footer.append(panel)
       }
-      const className = `guanyin-shell${identity?.impersonated ? ' guanyin-shell--impersonated' : ''}`
-      if (shell.className !== className) shell.className = className
       const displayName = identity?.user?.displayName || identity?.user?.username || '已登录用户'
       const initial = Array.from(displayName)[0] || '观'
       const spaceName = identity?.space?.name || 'Agent 工作空间'
       const tenantName = identity?.tenant?.name || ''
       const role = roleNames[identity?.space?.role] || identity?.space?.role || '空间成员'
-      const content = `<a class="guanyin-shell__brand" href="/console"><img src="/__guanyin/brand/logo.png" alt="观因"><strong>观因</strong></a><span class="guanyin-shell__space">${escapeHtml(spaceName)}</span>${identity?.impersonated ? '<span class="guanyin-shell__warning">管理员代入访问</span>' : ''}<div class="guanyin-shell__identity"><span class="guanyin-shell__avatar">${escapeHtml(initial)}</span><span class="guanyin-shell__user"><strong>${escapeHtml(displayName)}</strong><small>${escapeHtml([tenantName, role].filter(Boolean).join(' · '))}</small></span><a class="guanyin-shell__back" href="/console">返回控制台</a></div>`
-      if (shell.innerHTML !== content) shell.innerHTML = content
+      panel.className = 'dcu-guanyin-identity'
+      const detail = [tenantName, spaceName, role].filter(Boolean).join(' · ')
+      const content = `<span class="dcu-guanyin-avatar">${escapeHtml(initial)}</span><span class="dcu-guanyin-copy"><strong${identity?.impersonated ? ' class="dcu-guanyin-impersonated"' : ''}>${escapeHtml(displayName)}${identity?.impersonated ? ' · 代入访问' : ''}</strong><small title="${escapeHtml(detail)}">${escapeHtml(detail)}</small></span>`
+      if (panel.innerHTML !== content) panel.innerHTML = content
     }
 
     function escapeHtml(value) {
@@ -187,7 +203,7 @@ window.__ModuleLoader__.load({
         const response = await fetch('/__guanyin/identity', { credentials: 'same-origin', cache: 'no-store' })
         if (response.ok) identity = await response.json()
       } catch {}
-      renderIdentityShell()
+      renderIdentityFooter()
     }
 
     function enforcePolicy(root = document) {
@@ -196,6 +212,7 @@ window.__ModuleLoader__.load({
       removeCompanionManagement(root)
       removePluginExternalActions(root)
       removeManagedSettings(root)
+      renderIdentityFooter()
     }
 
     function apply(ctx) {
@@ -203,7 +220,6 @@ window.__ModuleLoader__.load({
 
       const start = () => {
         enforcePolicy()
-        renderIdentityShell()
         void loadIdentity()
         const pendingRoots = new Set()
         let timer
@@ -216,7 +232,7 @@ window.__ModuleLoader__.load({
         const observer = new MutationObserver((mutations) => {
           for (const mutation of mutations) {
             const target = mutation.target.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target.parentElement
-            if (!target || target.closest?.('[data-guanyin-shell]')) continue
+            if (!target || target.closest?.('[data-guanyin-managed]')) continue
             pendingRoots.add(target)
           }
           if (pendingRoots.size && timer === undefined) timer = setTimeout(flush, 100)
