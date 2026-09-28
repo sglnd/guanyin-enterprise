@@ -8,6 +8,10 @@ COPY control-plane/package-lock.json ./package-lock.json
 RUN npm ci --omit=dev && npm cache clean --force
 COPY control-plane/server.mjs ./server.mjs
 COPY control-plane/store.mjs ./store.mjs
+COPY control-plane/dsh-adapter.mjs ./dsh-adapter.mjs
+COPY control-plane/api-runner.mjs ./api-runner.mjs
+COPY control-plane/api-contract.mjs ./api-contract.mjs
+COPY control-plane/api-builder-mcp.mjs ./api-builder-mcp.mjs
 COPY control-plane/public ./public
 COPY assets/branding/guanyin-mark-graphite-cinnabar-v4.png ./public/guanyin-logo.png
 

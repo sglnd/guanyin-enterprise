@@ -1,0 +1,5 @@
+{
+  "hostOnlyPackages": [
+    "@js2hou/dsh-mcp-manager"
+  ]
+}

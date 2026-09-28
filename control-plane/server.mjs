@@ -5,14 +5,18 @@ import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypt
 import { readFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import * as store from './store.mjs'
+import { ApiRunWorker, createDshAdapter, isTerminalApiRun, validateApiInput } from './api-runner.mjs'
+import { generateApiDocumentation, normalizeApiManifest } from './api-contract.mjs'
+import { apiBuilderTools, executeApiBuilderTool, generateApiDraftWithAi } from './api-builder-mcp.mjs'
 
 const PORT = Number(process.env.PORT || 8080)
 const PUBLIC_DIR = process.env.PUBLIC_DIR || '/app/public'
 const NAMESPACE = process.env.DSH_NAMESPACE || 'guanyin-instances'
-const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/deepseek-harness-agent:0.2.9-arm64'
-const DSH_VERSION = process.env.DSH_VERSION || '0.2.9-arm64'
+const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/deepseek-harness-agent:0.1.5-rc.2-core-arm64'
+const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2'
 const PUBLIC_HOSTS = process.env.DSH_TRUSTED_HOSTS || 'localhost:18080,127.0.0.1:18080'
 const DSH_PERMISSION_MODE = process.env.DSH_PERMISSION_MODE || 'danger-full-access'
+const API_BUILDER_MCP_URL = process.env.API_BUILDER_MCP_URL || 'http://guanyin-control-plane.guanyin-system.svc.cluster.local:18080/internal/mcp/api-builder'
 const SESSION_TTL = 12 * 60 * 60 * 1000
 const IDLE_TIMEOUT_MINUTES = Number(process.env.IDLE_TIMEOUT_MINUTES || 60)
 const isDevelopment = process.env.NODE_ENV !== 'production'
@@ -45,6 +49,12 @@ function sendJson(res, status, value, headers = {}) {
   res.end(body)
 }
 
+function sameSecret(actual, expected) {
+  const left = Buffer.from(String(actual || ''))
+  const right = Buffer.from(String(expected || ''))
+  return left.length === right.length && timingSafeEqual(left, right)
+}
+
 function redirect(res, location, headers = {}) {
   res.writeHead(302, { location, ...headers })
   res.end()
@@ -69,7 +79,21 @@ function idleTimeout(value) {
   return Number.isInteger(minutes) && minutes >= 15 && minutes <= 10080 ? minutes : undefined
 }
 
-function publicUser(user) { return { id: user.id, username: user.username, displayName: user.displayName, role: user.role, tenantId: user.tenantId, tenantName: user.tenantName, enabled: user.enabled } }
+function mcpInput(input, updating = false) {
+  const name = String(input.name || '').trim()
+  const serverName = String(input.serverName || '').trim()
+  const description = String(input.description || '').trim()
+  const url = String(input.url || '').trim()
+  let headers
+  if (!updating || input.headers !== undefined) {
+    headers = typeof input.headers === 'string' ? JSON.parse(input.headers || '{}') : (input.headers || {})
+    if (!headers || Array.isArray(headers) || Object.values(headers).some(value => typeof value !== 'string')) throw new Error('请求头必须是 JSON 字符串键值对象')
+  }
+  if (!name || !/^[A-Za-z0-9_-]{1,32}$/.test(serverName) || !/^https?:\/\/.+/.test(url)) throw new Error('MCP 名称、serverName 或服务地址无效')
+  return { name, serverName, description, transport: 'streamable-http', url, headers, enabled: input.enabled === true || input.enabled === 'true' }
+}
+
+function publicUser(user) { return { id: user.id, username: user.username, displayName: user.displayName, role: user.role, mcpAdmin: user.mcpAdmin, apiAdmin: user.apiAdmin, tenantId: user.tenantId, tenantName: user.tenantName, enabled: user.enabled } }
 
 function clientIp(req) {
   return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim().slice(0, 64)
@@ -128,6 +152,7 @@ async function k8sRequest(method, path, payload) {
 
 async function createResource(kind, resource) {
   const paths = {
+    ConfigMap: `/api/v1/namespaces/${NAMESPACE}/configmaps`,
     Secret: `/api/v1/namespaces/${NAMESPACE}/secrets`,
     PersistentVolumeClaim: `/api/v1/namespaces/${NAMESPACE}/persistentvolumeclaims`,
     Service: `/api/v1/namespaces/${NAMESPACE}/services`,
@@ -140,11 +165,155 @@ async function createResource(kind, resource) {
   }
 }
 
+async function upsertResource(kind, name, resource) {
+  const paths = { ConfigMap: 'configmaps', Secret: 'secrets' }
+  try {
+    const created = await createResource(kind, resource)
+    if (created) return created
+    return k8sRequest('PATCH', `/api/v1/namespaces/${NAMESPACE}/${paths[kind]}/${name}`, resource)
+  }
+  catch (error) {
+    if (!String(error.message).includes('already exists')) throw error
+    return k8sRequest('PATCH', `/api/v1/namespaces/${NAMESPACE}/${paths[kind]}/${name}`, resource)
+  }
+}
+
+function mcpResourceName(instance) { return `dsh-${instance.slug}-mcp` }
+
+function delay(milliseconds) { return new Promise(resolve => setTimeout(resolve, milliseconds)) }
+
+async function waitForDeploymentReady(path, generation, replicas, timeoutMs = 120_000) {
+  if (replicas === 0) return
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const deployment = await k8sRequest('GET', path)
+    const observed = Number(deployment.status?.observedGeneration || 0) >= Number(generation || 0)
+    const ready = Number(deployment.status?.readyReplicas || 0) >= replicas
+    const updated = Number(deployment.status?.updatedReplicas || 0) >= replicas
+    const unavailable = Number(deployment.status?.unavailableReplicas || 0)
+    if (observed && ready && updated && unavailable === 0) return
+    await delay(2_000)
+  }
+  throw new Error('MCP 配置已保存，但空间刷新超时，请稍后查看空间状态')
+}
+
+function mcpEntry(item) {
+  return { id: `guanyin-mcp-${item.serverName}`, config: {
+    serverName: item.serverName, transport: item.transport, url: item.url,
+    ...(Object.keys(item.headers || {}).length ? { headers: item.headers } : {}),
+  } }
+}
+
+async function callMcpManager(instance, endpoint, payload = {}) {
+  const token = await instanceExtensionToken(instance)
+  const response = await fetch(`http://dsh-${instance.slug}.${NAMESPACE}.svc.cluster.local:3080/__guanyin/mcp-manager/${endpoint}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-guanyin-token': token },
+    body: JSON.stringify(payload), signal: AbortSignal.timeout(15_000),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(data.error || `DSH MCP Manager 返回 HTTP ${response.status}`)
+  if (!data.result?.ok) throw new Error(data.result?.error?.message || 'DSH MCP Manager 调用失败')
+  return data.result.value
+}
+
+async function instanceExtensionToken(instance) {
+  const secret = await k8sRequest('GET', `/api/v1/namespaces/${NAMESPACE}/secrets/dsh-${instance.slug}`)
+  const token = Buffer.from(secret.data?.extensionToken || '', 'base64').toString('utf8')
+  if (!token) throw new Error('空间内部管理密钥不存在')
+  return token
+}
+
+async function applySpaceMcp(instance) {
+  const name = mcpResourceName(instance)
+  const labels = { 'app.kubernetes.io/name': 'dsh', 'guanyin.io/instance': instance.id, 'guanyin.io/config': 'mcp' }
+  const bindings = await store.listSpaceMcpBindings(instance.id, true)
+  const revision = `${Date.now()}`
+  await upsertResource('ConfigMap', name, { apiVersion: 'v1', kind: 'ConfigMap', metadata: { name, labels }, data: {
+    'config.json': JSON.stringify({ revision, servers: bindings.map(({ headers, ...item }) => item) }, null, 2),
+  } })
+  const deploymentPath = `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`
+  const deployment = await k8sRequest('GET', deploymentPath)
+  const replicas = Number(deployment.spec.replicas || 0)
+  if (replicas === 0) return revision
+  const token = await instanceExtensionToken(instance)
+  const current = await callMcpManager(instance, 'list')
+  const desired = new Map(bindings.filter(item => item.enabled).map(item => { const entry = mcpEntry(item); return [entry.id, entry] }))
+  const apiBuilder = { id: 'guanyin-mcp-api-builder', config: {
+    serverName: 'guanyin-api-builder', transport: 'streamable-http', url: API_BUILDER_MCP_URL,
+    headers: { 'X-Guanyin-Instance': instance.id, 'X-Guanyin-Token': token },
+  } }
+  desired.set(apiBuilder.id, apiBuilder)
+  const managed = (current.servers || []).filter(item => item.id.startsWith('guanyin-mcp-'))
+  for (const item of managed) if (!desired.has(item.id)) await callMcpManager(instance, 'remove', { id: item.id })
+  for (const entry of desired.values()) {
+    const existing = managed.find(item => item.id === entry.id)
+    await callMcpManager(instance, existing ? 'update' : 'add', entry)
+  }
+  return revision
+}
+
+async function syncSpaceMcpWhenReady(instance) {
+  const path = `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`
+  const deployment = await k8sRequest('GET', path)
+  const replicas = Number(deployment.spec.replicas || 0)
+  if (replicas === 0) return
+  await waitForDeploymentReady(path, deployment.metadata?.generation, replicas)
+  await applySpaceMcp(instance)
+}
+
+async function apiBuilderMcp(req, res) {
+  if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' }, { allow: 'POST' })
+  const instanceId = String(req.headers['x-guanyin-instance'] || '')
+  const instance = /^[0-9a-f-]{36}$/i.test(instanceId) ? await store.instanceById(instanceId) : undefined
+  if (!instance) return sendJson(res, 401, { error: 'invalid space credential' })
+  const expected = await instanceExtensionToken(instance)
+  if (!sameSecret(req.headers['x-guanyin-token'], expected)) return sendJson(res, 401, { error: 'invalid space credential' })
+  const message = await bodyJson(req)
+  const rpc = async item => {
+    const { id, method, params = {} } = item || {}
+    if (method === 'initialize') return { jsonrpc: '2.0', id, result: {
+      protocolVersion: '2025-03-26', capabilities: { tools: { listChanged: false } },
+      serverInfo: { name: 'guanyin-api-builder', version: '0.1.0' },
+    } }
+    if (method === 'ping') return { jsonrpc: '2.0', id, result: {} }
+    if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: apiBuilderTools } }
+    if (method === 'tools/call') {
+      try {
+        const value = await executeApiBuilderTool(params.name, params.arguments || {}, { store, instance, audit })
+        return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value } }
+      } catch (error) {
+        const message = error.code === '23505' ? '接口标识已存在，请换一个 slug' : error.message
+        return { jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: message }] } }
+      }
+    }
+    if (id === undefined) return undefined
+    return { jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } }
+  }
+  const response = Array.isArray(message)
+    ? (await Promise.all(message.map(rpc))).filter(Boolean)
+    : await rpc(message)
+  if (response === undefined || (Array.isArray(response) && response.length === 0)) {
+    res.writeHead(202, { 'cache-control': 'no-store' }); return res.end()
+  }
+  return sendJson(res, 200, response)
+}
+
+async function manageableSpace(user, instanceId) {
+  if (user.role === 'platform_admin') return store.instanceById(instanceId)
+  const instance = await store.instanceOwnedByUser(instanceId, user.id)
+  return instance && ['owner','operator'].includes(instance.accessRole) ? instance : undefined
+}
+
 async function provision(instance) {
   const name = `dsh-${instance.slug}`
   const labels = { 'app.kubernetes.io/name': 'dsh', 'guanyin.io/instance': instance.id }
-  const probeHttpGet = { path: '/', port: 3080, httpHeaders: [{ name: 'Host', value: PUBLIC_HOSTS.split(',')[0] }] }
+  // DSH protects `/` with authentication and correctly returns 401 before a
+  // session is established. Probe the listening socket instead of requiring
+  // an unauthenticated HTTP 2xx response.
+  const probeTcpSocket = { tcpSocket: { port: 3080 }, periodSeconds: 10, timeoutSeconds: 10, failureThreshold: 6 }
   await createResource('Secret', { apiVersion: 'v1', kind: 'Secret', metadata: { name, labels }, stringData: { extensionToken: randomBytes(32).toString('hex') } })
+  const mcpName = mcpResourceName(instance)
+  await createResource('ConfigMap', { apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: mcpName, labels }, data: { 'config.json': JSON.stringify({ revision: 'initial', servers: [] }) } })
   for (const suffix of ['data', 'home']) await createResource('PersistentVolumeClaim', {
     apiVersion: 'v1', kind: 'PersistentVolumeClaim', metadata: { name: `${name}-${suffix}`, labels },
     spec: { accessModes: ['ReadWriteOnce'], resources: { requests: { storage: '2Gi' } } },
@@ -160,19 +329,20 @@ async function provision(instance) {
         env: [
           { name: 'DSH_HOME', value: '/data/dsh' }, { name: 'BANKOPS_WEB_PROXY', value: '1' },
           { name: 'DSH_BROWSER_AUTH_MODE', value: 'trusted-host' }, { name: 'DSH_TRUSTED_HOSTS', value: PUBLIC_HOSTS },
-          { name: 'DSH_PERMISSION_MODE', value: DSH_PERMISSION_MODE }, { name: 'DEEPSEEK_API_KEY', value: 'pending-model-service' },
-          { name: 'DEEPSEEK_BASE_URL', value: 'https://api.deepseek.com' },
+          { name: 'DSH_PERMISSION_MODE', value: DSH_PERMISSION_MODE },
           { name: 'DSH_EXT_TOKEN', valueFrom: { secretKeyRef: { name, key: 'extensionToken' } } },
         ],
         securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } },
         resources: { requests: { cpu: '100m', memory: '256Mi' }, limits: { cpu: '2', memory: '4Gi' } },
         // A startup probe gives first-run profile migration enough time without
         // confusing initialization with a permanently unhealthy pod.
-        startupProbe: { httpGet: probeHttpGet, periodSeconds: 10, timeoutSeconds: 10, failureThreshold: 60 },
-        readinessProbe: { httpGet: probeHttpGet, periodSeconds: 10, timeoutSeconds: 10, failureThreshold: 6 },
-        volumeMounts: [{ name: 'data', mountPath: '/data/dsh' }, { name: 'home', mountPath: '/home/node' }, { name: 'workspace', mountPath: '/workspace' }],
+        startupProbe: { tcpSocket: { port: 3080 }, periodSeconds: 10, timeoutSeconds: 10, failureThreshold: 60 },
+        readinessProbe: { ...probeTcpSocket },
+        volumeMounts: [{ name: 'data', mountPath: '/data/dsh' }, { name: 'home', mountPath: '/home/node' }, { name: 'workspace', mountPath: '/workspace' },
+          { name: 'guanyin-mcp-config', mountPath: '/etc/guanyin/mcp', readOnly: true }],
       }],
-      volumes: [{ name: 'data', persistentVolumeClaim: { claimName: `${name}-data` } }, { name: 'home', persistentVolumeClaim: { claimName: `${name}-home` } }, { name: 'workspace', emptyDir: {} }],
+      volumes: [{ name: 'data', persistentVolumeClaim: { claimName: `${name}-data` } }, { name: 'home', persistentVolumeClaim: { claimName: `${name}-home` } }, { name: 'workspace', emptyDir: {} },
+        { name: 'guanyin-mcp-config', configMap: { name: mcpName } }],
     } } },
   })
 }
@@ -190,7 +360,125 @@ async function scaleInstance(instance, replicas) {
   const status = replicas === 0 ? 'stopped' : 'starting'
   await store.updateInstance(instance.id, { status, error: null })
   instance.status = status
+  if (replicas > 0) {
+    const path = `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`
+    void (async () => {
+      try {
+        const deployment = await k8sRequest('GET', path)
+        await waitForDeploymentReady(path, deployment.metadata?.generation, replicas)
+        await applySpaceMcp(instance)
+      } catch (error) {
+        console.error(`failed to synchronize MCP for ${instance.id} after start:`, error)
+      }
+    })()
+  }
   return instance
+}
+
+function apiSecret(req) {
+  const authorization = String(req.headers.authorization || '')
+  if (/^Bearer\s+\S+$/i.test(authorization)) return authorization.replace(/^Bearer\s+/i, '')
+  return String(req.headers['x-api-key'] || '')
+}
+
+function publicRun(run) {
+  return {
+    id: run.id, requestId: run.requestId, conversationKey: run.conversationKey, status: run.status,
+    output: run.output, error: run.errorCode ? { code: run.errorCode, message: run.errorMessage } : null,
+    queuedAt: run.queuedAt, startedAt: run.startedAt, completedAt: run.completedAt,
+  }
+}
+
+async function adapterForRun(run) {
+  const instance = { id: run.instanceId, slug: run.instanceSlug }
+  return createDshAdapter({ instance, token: await instanceExtensionToken(instance), namespace: NAMESPACE })
+}
+
+async function ensureApiInstanceReady(run) {
+  const instance = await store.instanceById(run.instanceId)
+  if (!instance) throw Object.assign(new Error('接口所属空间不存在'), { code: 'SPACE_NOT_FOUND' })
+  await refreshInstanceStatus(instance)
+  if (instance.status === 'stopped' || instance.status === 'stopping') await scaleInstance(instance, 1)
+  if (instance.status !== 'running') {
+    const path = `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`
+    const deployment = await k8sRequest('GET', path)
+    await waitForDeploymentReady(path, deployment.metadata?.generation, 1)
+  }
+  markInstanceActive(instance.id)
+}
+
+async function streamRunEvents(req, res, run) {
+  let closed = false
+  req.on('close', () => { closed = true })
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive', 'x-accel-buffering': 'no',
+  })
+  res.write(': connected\n\n')
+  let cursor = Math.max(Number(req.headers['last-event-id'] || 0) || 0, 0)
+  let heartbeatAt = Date.now()
+  while (!closed) {
+    const events = await store.listApiRunEvents(run.id, cursor)
+    for (const event of events) {
+      cursor = Number(event.sequence)
+      res.write(`id: ${cursor}\nevent: ${event.eventType}\ndata: ${JSON.stringify(event.data)}\n\n`)
+    }
+    const current = await store.apiRunById(run.id, run.credentialId)
+    if (!current || (isTerminalApiRun(current.status) && events.length === 0)) break
+    if (Date.now() - heartbeatAt >= 15_000) { res.write(': heartbeat\n\n'); heartbeatAt = Date.now() }
+    await delay(750)
+  }
+  if (!res.writableEnded) res.end()
+}
+
+async function openApi(req, res, path) {
+  const secret = apiSecret(req)
+  if (!secret) return sendJson(res, 401, { error: { code: 'UNAUTHORIZED', message: '缺少 API Key' } })
+  const create = path.match(/^\/openapi\/v1\/runs\/([a-z0-9-]+)$/)
+  if (create && req.method === 'POST') {
+    const invocation = await store.resolveApiInvocation(create[1], secret)
+    if (!invocation) return sendJson(res, 403, { error: { code: 'FORBIDDEN', message: 'API Key 无权调用该接口' } })
+    const body = await bodyJson(req)
+    const input = body.input === undefined ? body : body.input
+    const validation = validateApiInput(invocation.contract, input)
+    if (!validation.valid) return sendJson(res, 400, { error: { code: 'INPUT_SCHEMA_VALIDATION_FAILED', message: '输入不符合接口 Schema', details: validation.errors } })
+    const maxQueueSize = Math.max(Number(invocation.contract?.maxQueueSize || 100), 1)
+    const requestId = String(req.headers['x-request-id'] || randomUUID()).slice(0, 128)
+    const conversationKey = body.conversationKey == null ? null : String(body.conversationKey).slice(0, 128)
+    const result = await store.createApiRun({ id: randomUUID(), apiReleaseId: invocation.apiReleaseId, credentialId: invocation.credentialId,
+      instanceId: invocation.instanceId, requestId, conversationKey, input, maxQueueSize })
+    if (result.queueFull) return sendJson(res, 429, { error: { code: 'QUEUE_FULL', message: '接口队列已满，请稍后重试' } }, { 'retry-after': '5' })
+    if (!result.run) return sendJson(res, 409, { error: { code: 'REQUEST_ID_CONFLICT', message: 'requestId 已被其他凭证使用' } })
+    if (result.created) await store.appendApiRunEvent(result.run.id, 'run.queued', { runId: result.run.id })
+    return sendJson(res, result.created ? 202 : 200, { run: publicRun(result.run), events: `/openapi/v1/runs/${result.run.id}/events` })
+  }
+  const credential = await store.apiCredentialBySecret(secret)
+  if (!credential) return sendJson(res, 401, { error: { code: 'UNAUTHORIZED', message: 'API Key 无效或已过期' } })
+  const events = path.match(/^\/openapi\/v1\/runs\/([0-9a-f-]{36})\/events$/i)
+  if (events && req.method === 'GET') {
+    const run = await store.apiRunById(events[1], credential.id)
+    if (!run) return sendJson(res, 404, { error: { code: 'RUN_NOT_FOUND', message: '运行记录不存在' } })
+    return streamRunEvents(req, res, run)
+  }
+  const target = path.match(/^\/openapi\/v1\/runs\/([0-9a-f-]{36})$/i)
+  if (target && req.method === 'GET') {
+    const run = await store.apiRunById(target[1], credential.id)
+    return run ? sendJson(res, 200, { run: publicRun(run) }) : sendJson(res, 404, { error: { code: 'RUN_NOT_FOUND', message: '运行记录不存在' } })
+  }
+  if (target && req.method === 'DELETE') {
+    const current = await store.apiRunById(target[1], credential.id)
+    if (!current) return sendJson(res, 404, { error: { code: 'RUN_NOT_FOUND', message: '运行记录不存在' } })
+    if (isTerminalApiRun(current.status)) return sendJson(res, 200, { run: publicRun(current) })
+    const cancelled = await store.cancelApiRun(current.id, credential.id)
+    await store.appendApiRunEvent(current.id, 'run.cancelled', {})
+    if (current.dshSessionId) {
+      const context = await store.apiRunExecutionContext(current.id)
+      const adapter = await adapterForRun(context)
+      await adapter.cancel(current.dshSessionId).catch(() => {})
+    }
+    return sendJson(res, 200, { run: publicRun(cancelled) })
+  }
+  return sendJson(res, 404, { error: { code: 'NOT_FOUND', message: '接口不存在' } })
 }
 
 async function api(req, res, path) {
@@ -211,6 +499,151 @@ async function api(req, res, path) {
     return sendJson(res, 200, { ok: true }, { 'set-cookie': 'guanyin_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0' })
   }
   if (path === '/api/me') return sendJson(res, 200, { user: publicUser(user), version: DSH_VERSION })
+  const canManageApi = user.role === 'platform_admin' || user.apiAdmin
+  if (path === '/api/api-builder/generate' && req.method === 'POST') {
+    if (!canManageApi) return sendJson(res, 403, { error: '需要平台管理员或接口管理员权限' })
+    const input = await bodyJson(req)
+    const instance = await store.instanceById(input.instanceId)
+    const requirement = String(input.requirement || '').trim()
+    if (!instance || requirement.length < 10 || requirement.length > 4_000) return sendJson(res, 400, { error: '请选择空间，并填写 10–4000 字的接口需求' })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new Error('AI generation timeout')), 120_000)
+    try {
+      await ensureApiInstanceReady({ instanceId: instance.id })
+      const adapter = createDshAdapter({ instance, token: await instanceExtensionToken(instance), namespace: NAMESPACE })
+      const suggestion = await generateApiDraftWithAi(adapter, requirement, { signal: controller.signal })
+      await audit({ actorUserId: user.id, action: 'api_definition_ai_generate', targetInstanceId: instance.id,
+        details: { source: 'console-ai-helper', ip: clientIp(req) } })
+      return sendJson(res, 200, { suggestion })
+    } catch (error) {
+      const message = controller.signal.aborted ? 'AI 生成超时，请稍后重试' : error.message
+      return sendJson(res, 502, { error: message })
+    } finally { clearTimeout(timer) }
+  }
+  if (path === '/api/api-catalog' && req.method === 'GET') {
+    if (!canManageApi) return sendJson(res, 403, { error: '需要平台管理员或接口管理员权限' })
+    const [instances, identity] = await Promise.all([store.listAllInstances(), store.overview()])
+    const members = Object.fromEntries(await Promise.all(instances.map(async instance => [instance.id, await store.listInstanceMembers(instance.id)])))
+    return sendJson(res, 200, { instances, users: identity.users.map(publicUser), members })
+  }
+  if (path === '/api/api-definitions' && req.method === 'GET') {
+    return sendJson(res, 200, { definitions: await store.listApiDefinitions(user, canManageApi), canManage: canManageApi })
+  }
+  if (path === '/api/api-definitions' && req.method === 'POST') {
+    if (!canManageApi) return sendJson(res, 403, { error: '需要平台管理员或接口管理员权限' })
+    try {
+      const input = await bodyJson(req); const slug = safeName(input.slug); const name = String(input.name || '').trim()
+      const instance = await store.instanceById(input.instanceId); const owner = await store.userById(input.ownerUserId)
+      const members = instance ? await store.listInstanceMembers(instance.id) : []
+      if (!slug || !name || !instance || !owner || !members.some(member => member.id === owner.id)) throw new Error('接口名称、标识、空间或负责人无效')
+      const definition = await store.createApiDefinition({ id: randomUUID(), slug, name, description: String(input.description || '').trim(),
+        instanceId: instance.id, ownerUserId: owner.id, manifest: normalizeApiManifest(input), createdBy: user.id })
+      await audit({ actorUserId: user.id, action: 'api_definition_create', targetInstanceId: instance.id, details: { apiDefinitionId: definition.id, slug, ip: clientIp(req) } })
+      return sendJson(res, 201, { definition })
+    } catch (error) { return sendJson(res, error.code === '23505' ? 409 : 400, { error: error.code === '23505' ? '接口标识已存在' : error.message }) }
+  }
+  const apiDefinition = path.match(/^\/api\/api-definitions\/([^/]+)$/)
+  if (apiDefinition && req.method === 'PATCH') {
+    if (!canManageApi) return sendJson(res, 403, { error: '需要平台管理员或接口管理员权限' })
+    const current = await store.apiDefinitionById(apiDefinition[1]); if (!current) return sendJson(res, 404, { error: '接口不存在' })
+    if (current.status === 'retired') return sendJson(res, 409, { error: '已下线接口不可编辑' })
+    try {
+      const input = await bodyJson(req); const instance = await store.instanceById(input.instanceId); const owner = await store.userById(input.ownerUserId)
+      const members = instance ? await store.listInstanceMembers(instance.id) : []
+      if (!safeName(input.slug) || !String(input.name || '').trim() || !owner || !members.some(member => member.id === owner.id)) throw new Error('接口名称、标识、空间或负责人无效')
+      const definition = await store.updateApiDefinition(current.id, { slug: safeName(input.slug), name: String(input.name).trim(), description: String(input.description || '').trim(),
+        instanceId: instance.id, ownerUserId: owner.id, manifest: normalizeApiManifest(input) })
+      await audit({ actorUserId: user.id, action: 'api_definition_update', targetInstanceId: instance.id, details: { apiDefinitionId: current.id, ip: clientIp(req) } })
+      return sendJson(res, 200, { definition })
+    } catch (error) { return sendJson(res, error.code === '23505' ? 409 : 400, { error: error.code === '23505' ? '接口标识已存在' : error.message }) }
+  }
+  const validateDefinition = path.match(/^\/api\/api-definitions\/([^/]+)\/validate$/)
+  if (validateDefinition && req.method === 'POST') {
+    if (!canManageApi) return sendJson(res, 403, { error: '需要平台管理员或接口管理员权限' })
+    const definition = await store.apiDefinitionById(validateDefinition[1]); if (!definition) return sendJson(res, 404, { error: '接口不存在' })
+    if (definition.status === 'retired') return sendJson(res, 409, { error: '已下线接口不可重新校验' })
+    try { normalizeApiManifest(definition.draftManifest) } catch (error) { return sendJson(res, 400, { error: error.message }) }
+    await store.setApiDefinitionValidated(definition.id)
+    await audit({ actorUserId: user.id, action: 'api_definition_validate', targetInstanceId: definition.instanceId, details: { apiDefinitionId: definition.id, ip: clientIp(req) } })
+    return sendJson(res, 200, { validated: true })
+  }
+  const publishDefinition = path.match(/^\/api\/api-definitions\/([^/]+)\/publish$/)
+  if (publishDefinition && req.method === 'POST') {
+    if (!canManageApi) return sendJson(res, 403, { error: '需要平台管理员或接口管理员权限' })
+    const definition = await store.apiDefinitionById(publishDefinition[1]); if (!definition) return sendJson(res, 404, { error: '接口不存在' })
+    if (definition.status === 'retired') return sendJson(res, 409, { error: '已下线接口不可重新发布' })
+    const release = await store.publishApiDefinition(definition.id, row => generateApiDocumentation({ slug: row.slug, name: row.name,
+      description: row.description, version: row.version, contract: row.contract }), user.id)
+    if (!release) return sendJson(res, 409, { error: '请先校验接口草稿，再进行发布' })
+    await audit({ actorUserId: user.id, action: 'api_definition_publish', targetInstanceId: definition.instanceId, details: { apiDefinitionId: definition.id, releaseId: release.id, version: release.version, ip: clientIp(req) } })
+    return sendJson(res, 201, { release })
+  }
+  const retireDefinition = path.match(/^\/api\/api-definitions\/([^/]+)\/retire$/)
+  if (retireDefinition && req.method === 'POST') {
+    if (!canManageApi) return sendJson(res, 403, { error: '需要平台管理员或接口管理员权限' })
+    const definition = await store.apiDefinitionById(retireDefinition[1]); if (!definition) return sendJson(res, 404, { error: '接口不存在' })
+    await store.retireApiDefinition(definition.id)
+    await audit({ actorUserId: user.id, action: 'api_definition_retire', targetInstanceId: definition.instanceId, details: { apiDefinitionId: definition.id, ip: clientIp(req) } })
+    return sendJson(res, 200, { retired: true })
+  }
+  const definitionDocs = path.match(/^\/api\/api-definitions\/([^/]+)\/documentation$/)
+  if (definitionDocs && req.method === 'GET') {
+    const definition = await store.apiDefinitionById(definitionDocs[1]); if (!definition) return sendJson(res, 404, { error: '接口不存在' })
+    if (!canManageApi && !await manageableSpace(user, definition.instanceId)) return sendJson(res, 403, { error: '无权查看接口文档' })
+    const release = await store.apiReleaseByDefinition(definition.id)
+    return release ? sendJson(res, 200, { release }) : sendJson(res, 404, { error: '接口尚未发布' })
+  }
+  const definitionRuns = path.match(/^\/api\/api-definitions\/([^/]+)\/runs$/)
+  if (definitionRuns && req.method === 'GET') {
+    const definition = await store.apiDefinitionById(definitionRuns[1]); if (!definition) return sendJson(res, 404, { error: '接口不存在' })
+    if (!canManageApi && !await manageableSpace(user, definition.instanceId)) return sendJson(res, 403, { error: '无权查看接口运行记录' })
+    const runs = await store.listApiRunsByDefinition(definition.id)
+    return sendJson(res, 200, { runs: runs.map(run => ({ ...publicRun(run), credentialName: run.credentialName, keyPrefix: run.keyPrefix })) })
+  }
+  const managedRunEvents = path.match(/^\/api\/api-runs\/([0-9a-f-]{36})\/events$/i)
+  if (managedRunEvents && req.method === 'GET') {
+    const run = await store.apiRunById(managedRunEvents[1]); if (!run) return sendJson(res, 404, { error: '运行记录不存在' })
+    if (!canManageApi && !await manageableSpace(user, run.instanceId)) return sendJson(res, 403, { error: '无权查看运行事件' })
+    return sendJson(res, 200, { events: await store.listApiRunEvents(run.id, 0, 500) })
+  }
+  const spaceCredentials = path.match(/^\/api\/instances\/([^/]+)\/api-credentials$/)
+  if (spaceCredentials && req.method === 'GET') {
+    const instance = await manageableSpace(user, spaceCredentials[1]); if (!instance) return sendJson(res, 403, { error: '无权管理该空间的接口凭证' })
+    return sendJson(res, 200, { credentials: await store.listApiCredentials(instance.id) })
+  }
+  if (spaceCredentials && req.method === 'POST') {
+    const instance = await manageableSpace(user, spaceCredentials[1]); if (!instance) return sendJson(res, 403, { error: '无权管理该空间的接口凭证' })
+    const input = await bodyJson(req); const name = String(input.name || '').trim(); const maxConcurrency = Number(input.maxConcurrency || 1)
+    if (!name || !Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 100) return sendJson(res, 400, { error: '凭证名称或并发数无效' })
+    const secret = `gyn_${randomBytes(24).toString('base64url')}`; const id = randomUUID()
+    await store.createApiCredential({ id, instanceId: instance.id, name, keyPrefix: secret.slice(0,12), secretHash: store.apiKeyHash(secret), maxConcurrency,
+      expiresAt: input.expiresAt || null, createdBy: user.id })
+    await audit({ actorUserId: user.id, action: 'api_credential_create', targetInstanceId: instance.id, details: { credentialId: id, ip: clientIp(req) } })
+    return sendJson(res, 201, { credential: (await store.listApiCredentials(instance.id)).find(item => item.id === id), secret })
+  }
+  const credentialGrant = path.match(/^\/api\/instances\/([^/]+)\/api-credentials\/([^/]+)\/grants$/)
+  if (credentialGrant && req.method === 'PUT') {
+    const instance = await manageableSpace(user, credentialGrant[1]); const credential = await store.apiCredentialById(credentialGrant[2]); const input = await bodyJson(req)
+    if (!instance || !credential || credential.instanceId !== instance.id) return sendJson(res, 403, { error: '无权管理该接口凭证' })
+    const release = await store.apiReleaseByDefinition(input.apiDefinitionId)
+    const definition = await store.apiDefinitionById(input.apiDefinitionId)
+    if (!release || release.retiredAt || !definition || definition.instanceId !== instance.id) return sendJson(res, 400, { error: '只能授权本空间当前有效的发布接口' })
+    await store.setApiCredentialGrant(credential.id, release.id, user.id, input.enabled !== false)
+    await audit({ actorUserId: user.id, action: input.enabled === false ? 'api_credential_revoke' : 'api_credential_grant', targetInstanceId: instance.id,
+      details: { credentialId: credential.id, apiDefinitionId: definition.id, releaseId: release.id, ip: clientIp(req) } })
+    return sendJson(res, 200, { credentials: await store.listApiCredentials(instance.id) })
+  }
+  const credentialSettings = path.match(/^\/api\/instances\/([^/]+)\/api-credentials\/([^/]+)$/)
+  if (credentialSettings && req.method === 'PATCH') {
+    const instance = await manageableSpace(user, credentialSettings[1]); const credential = await store.apiCredentialById(credentialSettings[2]); const input = await bodyJson(req)
+    const maxConcurrency = Number(input.maxConcurrency || 1)
+    if (!instance || !credential || credential.instanceId !== instance.id) return sendJson(res, 403, { error: '无权管理该接口凭证' })
+    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 100) return sendJson(res, 400, { error: '凭证并发数无效' })
+    const updated = await store.updateApiCredential(credential.id, instance.id, { enabled: input.enabled !== false, maxConcurrency })
+    await audit({ actorUserId: user.id, action: updated.enabled ? 'api_credential_enable' : 'api_credential_disable', targetInstanceId: instance.id,
+      details: { credentialId: credential.id, maxConcurrency, ip: clientIp(req) } })
+    return sendJson(res, 200, { credential: updated })
+  }
   if (path === '/api/instances' && req.method === 'GET') {
     const instances = await store.listInstances(user)
     await Promise.all(instances.map(refreshInstanceStatus))
@@ -239,6 +672,78 @@ async function api(req, res, path) {
       details: { source: user.role === 'platform_admin' ? 'instance_management' : 'workspace', ip: clientIp(req) },
     })
     return sendJson(res, 202, { instance: result })
+  }
+  const canManageMcp = user.role === 'platform_admin' || user.mcpAdmin
+  if (path === '/api/mcp-servers' && req.method === 'GET') return sendJson(res, 200, { servers: await store.listMcpServers(), canManage: canManageMcp })
+  if (path === '/api/mcp-servers' && req.method === 'POST') {
+    if (!canManageMcp) return sendJson(res, 403, { error: '需要平台管理员或 MCP 管理员权限' })
+    try {
+      const value = mcpInput(await bodyJson(req))
+      const created = { id: randomUUID(), ...value, createdBy: user.id }
+      await store.createMcpServer(created)
+      await audit({ actorUserId: user.id, action: 'mcp_create', details: { mcpServerId: created.id, serverName: created.serverName, ip: clientIp(req) } })
+      return sendJson(res, 201, { server: await store.mcpServerById(created.id) })
+    } catch (error) {
+      if (error.code === '23505') return sendJson(res, 400, { error: 'serverName 已存在' })
+      return sendJson(res, 400, { error: error.message })
+    }
+  }
+  const mcpServer = path.match(/^\/api\/mcp-servers\/([^/]+)$/)
+  if (mcpServer && req.method === 'PATCH') {
+    if (!canManageMcp) return sendJson(res, 403, { error: '需要平台管理员或 MCP 管理员权限' })
+    const current = await store.mcpServerById(mcpServer[1], true)
+    if (!current) return sendJson(res, 404, { error: 'MCP 服务不存在' })
+    try {
+      const value = mcpInput(await bodyJson(req), true)
+      const updated = await store.updateMcpServer(current.id, value)
+      const spaces = await store.listMcpSpaces(current.id)
+      await Promise.all(spaces.map(applySpaceMcp))
+      await audit({ actorUserId: user.id, action: 'mcp_update', details: { mcpServerId: current.id, serverName: value.serverName, affectedSpaces: spaces.length, ip: clientIp(req) } })
+      return sendJson(res, 200, { server: updated })
+    } catch (error) {
+      if (error.code === '23505') return sendJson(res, 400, { error: 'serverName 已存在' })
+      return sendJson(res, 400, { error: error.message })
+    }
+  }
+  if (mcpServer && req.method === 'DELETE') {
+    if (!canManageMcp) return sendJson(res, 403, { error: '需要平台管理员或 MCP 管理员权限' })
+    const current = await store.mcpServerById(mcpServer[1])
+    if (!current) return sendJson(res, 404, { error: 'MCP 服务不存在' })
+    const spaces = await store.listMcpSpaces(current.id)
+    if (spaces.length) return sendJson(res, 409, { error: '请先取消所有空间接入，再删除 MCP' })
+    await store.deleteMcpServer(current.id)
+    await audit({ actorUserId: user.id, action: 'mcp_delete', details: { mcpServerId: current.id, serverName: current.serverName, ip: clientIp(req) } })
+    return sendJson(res, 200, { ok: true })
+  }
+  const mcpSpaces = path.match(/^\/api\/mcp-servers\/([^/]+)\/spaces$/)
+  if (mcpSpaces && req.method === 'GET') {
+    if (!canManageMcp) return sendJson(res, 403, { error: '需要平台管理员或 MCP 管理员权限' })
+    return sendJson(res, 200, { spaces: await store.listMcpSpaces(mcpSpaces[1]) })
+  }
+  const spaceMcp = path.match(/^\/api\/instances\/([^/]+)\/mcp-bindings$/)
+  if (spaceMcp && req.method === 'GET') {
+    const instance = await manageableSpace(user, spaceMcp[1])
+    if (!instance) return sendJson(res, 403, { error: '无权管理该空间的 MCP' })
+    return sendJson(res, 200, { bindings: await store.listSpaceMcpBindings(instance.id) })
+  }
+  if (spaceMcp && req.method === 'PUT') {
+    const instance = await manageableSpace(user, spaceMcp[1]); const input = await bodyJson(req)
+    const server = await store.mcpServerById(input.mcpServerId)
+    if (!instance) return sendJson(res, 403, { error: '无权管理该空间的 MCP' })
+    if (!server?.enabled) return sendJson(res, 400, { error: 'MCP 服务不存在或已停用' })
+    await store.setSpaceMcpBinding(instance.id, server.id, user.id)
+    const revision = await applySpaceMcp(instance)
+    await audit({ actorUserId: user.id, action: 'space_mcp_connect', targetInstanceId: instance.id, details: { mcpServerId: server.id, serverName: server.serverName, revision, ip: clientIp(req) } })
+    return sendJson(res, 200, { bindings: await store.listSpaceMcpBindings(instance.id), revision })
+  }
+  const removeSpaceMcp = path.match(/^\/api\/instances\/([^/]+)\/mcp-bindings\/([^/]+)$/)
+  if (removeSpaceMcp && req.method === 'DELETE') {
+    const instance = await manageableSpace(user, removeSpaceMcp[1]); const server = await store.mcpServerById(removeSpaceMcp[2])
+    if (!instance) return sendJson(res, 403, { error: '无权管理该空间的 MCP' })
+    if (!server || !await store.removeSpaceMcpBinding(instance.id, server.id)) return sendJson(res, 404, { error: '空间未接入该 MCP' })
+    const revision = await applySpaceMcp(instance)
+    await audit({ actorUserId: user.id, action: 'space_mcp_disconnect', targetInstanceId: instance.id, details: { mcpServerId: server.id, serverName: server.serverName, revision, ip: clientIp(req) } })
+    return sendJson(res, 200, { bindings: await store.listSpaceMcpBindings(instance.id), revision })
   }
   if (user.role !== 'platform_admin') return sendJson(res, 403, { error: '需要平台管理员权限' })
   if (path === '/api/admin/overview') { const data = await store.overview(); return sendJson(res, 200, { tenants: data.tenants, users: data.users.map(publicUser), versions: [{ id: DSH_VERSION, image: DSH_IMAGE, enabled: true }] }) }
@@ -327,7 +832,7 @@ async function api(req, res, path) {
     const role = input.role === 'tenant_admin' ? 'tenant_admin' : 'member'
     const displayName = String(input.displayName || '').trim()
     if (!displayName || !await store.tenantExists(input.tenantId)) return sendJson(res, 400, { error: '用户名称或租户无效' })
-    const updated = await store.updateUser(target.id, { displayName, role, tenantId: input.tenantId, enabled: input.enabled === true || input.enabled === 'true' })
+    const updated = await store.updateUser(target.id, { displayName, role, tenantId: input.tenantId, enabled: input.enabled === true || input.enabled === 'true', mcpAdmin: input.mcpAdmin === true || input.mcpAdmin === 'true', apiAdmin: input.apiAdmin === true || input.apiAdmin === 'true' })
     await audit({ actorUserId: user.id, action: 'user_update', targetUserId: target.id, details: { before: { displayName: target.displayName, role: target.role, tenantId: target.tenantId, enabled: target.enabled }, after: { displayName: updated.displayName, role: updated.role, tenantId: updated.tenantId, enabled: updated.enabled }, ip: clientIp(req) } })
     return sendJson(res, 200, { user: publicUser(updated) })
   }
@@ -344,9 +849,16 @@ async function api(req, res, path) {
   if (path === '/api/admin/instances' && req.method === 'POST') {
     const input = await bodyJson(req); const displayName = String(input.name || '').trim(); const slugBase = safeName(displayName) || 'workspace'; const timeout = idleTimeout(input.idleTimeoutMinutes)
     if (!displayName || !await store.tenantExists(input.tenantId) || timeout === undefined) return sendJson(res, 400, { error: '空间名称、租户或休眠规则无效' })
+    const requestedVersion = String(input.version || DSH_VERSION)
+    if (requestedVersion !== DSH_VERSION) return sendJson(res, 400, { error: '运行核心版本无效' })
     const instance = { id: randomUUID(), name: displayName, slug: `${slugBase}-${randomBytes(3).toString('hex')}`, version: DSH_VERSION, image: DSH_IMAGE, tenantId: input.tenantId, status: 'provisioning', idleTimeoutMinutes: timeout, createdAt: new Date().toISOString() }
     await store.createInstance(instance)
-    try { await provision(instance); instance.status = 'starting'; await store.updateInstance(instance.id, { status: instance.status }); await audit({ actorUserId: user.id, action: 'space_create', targetInstanceId: instance.id, details: { version: instance.version, tenantId: instance.tenantId, idleTimeoutMinutes: timeout, ip: clientIp(req) } }); return sendJson(res, 201, { instance }) }
+    try {
+      await provision(instance); instance.status = 'starting'; await store.updateInstance(instance.id, { status: instance.status })
+      void syncSpaceMcpWhenReady(instance).catch(error => console.error(`failed to initialize MCP for ${instance.id}:`, error))
+      await audit({ actorUserId: user.id, action: 'space_create', targetInstanceId: instance.id, details: { version: instance.version, tenantId: instance.tenantId, idleTimeoutMinutes: timeout, ip: clientIp(req) } })
+      return sendJson(res, 201, { instance })
+    }
     catch (error) { instance.status = 'error'; instance.error = error.message; await store.updateInstance(instance.id, { status: instance.status, error: instance.error }); return sendJson(res, 500, { error: error.message, instance }) }
   }
   return sendJson(res, 404, { error: '接口不存在' })
@@ -396,11 +908,17 @@ const server = http.createServer(async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname
     if (path === '/healthz') return sendJson(res, 200, { ok: true })
     if (path === '/readyz') { await store.health(); return sendJson(res, 200, { ok: true }) }
+    if (path === '/internal/mcp/api-builder') return await apiBuilderMcp(req, res)
+    if (path.startsWith('/openapi/v1/')) return await openApi(req, res, path)
     // DSH owns /api as its RPC carrier.  The control plane owns only its
     // explicit sub-routes; everything else is allowed through to the selected
     // image so image-baked settings/plugins/skills/MCP remain functional.
     const controlApi = path === '/api/login' || path === '/api/logout' || path === '/api/me' || path === '/api/instances'
       || /^\/api\/instances\/[^/]+\/(launch|start|stop)$/.test(path)
+      || /^\/api\/instances\/[^/]+\/mcp-bindings(?:\/[^/]+)?$/.test(path)
+      || /^\/api\/instances\/[^/]+\/api-credentials(?:\/[^/]+(?:\/grants)?)?$/.test(path)
+      || path.startsWith('/api/mcp-servers')
+      || path.startsWith('/api/api-definitions') || path.startsWith('/api/api-runs/') || path.startsWith('/api/api-builder/') || path === '/api/api-catalog'
       || path.startsWith('/api/admin/')
     if (controlApi) return await api(req, res, path)
     if (path === '/login' || path === '/console' || path === '/console/' || path.startsWith('/app') || path === '/lifecycle.css' || path === '/guanyin-logo.png') return await staticFile(req, res, path === '/login' ? '/console/' : path)
@@ -432,7 +950,18 @@ server.on('upgrade', async (req, socket, head) => {
 })
 
 await store.initialize({ adminUsername: process.env.BOOTSTRAP_ADMIN_USER || 'admin', adminPasswordHash: hashPassword(process.env.BOOTSTRAP_ADMIN_PASSWORD || 'Guanyin@2026') })
+const apiRunWorker = new ApiRunWorker({ store, adapterFor: adapterForRun, ensureInstanceReady: ensureApiInstanceReady })
+apiRunWorker.start()
 server.listen(PORT, '0.0.0.0', () => console.log(`Guanyin control plane listening on ${PORT}`))
+
+// Reconcile image-baked management MCPs after an upgrade. Calls are
+// idempotent; sleeping spaces are skipped and receive them on their next start.
+setTimeout(async () => {
+  for (const instance of await store.listAllInstances()) {
+    if (instance.version !== DSH_VERSION) continue
+    try { await applySpaceMcp(instance) } catch (error) { console.error(`failed to reconcile MCP for ${instance.id}:`, error) }
+  }
+}, 3_000 + Math.floor(Math.random() * 2_000)).unref()
 
 setInterval(async () => {
   try {
@@ -441,6 +970,7 @@ setInterval(async () => {
 }, 60_000).unref()
 
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
+  apiRunWorker.stop()
   server.close(async () => { await store.close(); process.exit(0) })
   setTimeout(() => process.exit(1), 10_000).unref()
 })
