@@ -190,14 +190,12 @@ window.__ModuleLoader__.load({
       renderIdentityShell()
     }
 
-    function enforcePolicy() {
-      const root = document
+    function enforcePolicy(root = document) {
       applyBranding(root)
       removeCodexSidebarExtensions(root)
       removeCompanionManagement(root)
       removePluginExternalActions(root)
       removeManagedSettings(root)
-      renderIdentityShell()
     }
 
     function apply(ctx) {
@@ -205,10 +203,26 @@ window.__ModuleLoader__.load({
 
       const start = () => {
         enforcePolicy()
+        renderIdentityShell()
         void loadIdentity()
-        const observer = new MutationObserver(() => enforcePolicy())
-        observer.observe(document.documentElement, { childList: true, subtree: true })
-        return () => observer.disconnect()
+        const pendingRoots = new Set()
+        let timer
+        const flush = () => {
+          timer = undefined
+          const roots = [...pendingRoots]
+          pendingRoots.clear()
+          roots.forEach(root => enforcePolicy(root))
+        }
+        const observer = new MutationObserver((mutations) => {
+          for (const mutation of mutations) {
+            const target = mutation.target.nodeType === Node.ELEMENT_NODE ? mutation.target : mutation.target.parentElement
+            if (!target || target.closest?.('[data-guanyin-shell]')) continue
+            pendingRoots.add(target)
+          }
+          if (pendingRoots.size && timer === undefined) timer = setTimeout(flush, 100)
+        })
+        observer.observe(document.documentElement, { childList: true, characterData: true, subtree: true })
+        return () => { observer.disconnect(); if (timer !== undefined) clearTimeout(timer) }
       }
 
       if (document.documentElement) {

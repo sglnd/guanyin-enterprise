@@ -18,8 +18,8 @@ fi
 
 if [ -f "$runtime_marker" ] \
   && grep -qx 'dsh=0.1.5-rc.2' "$runtime_marker" \
-  && grep -qx 'profile=guanyin-plugins-v6' "$seed_marker"; then
-  if grep -Eqx 'profile=(official-core|guanyin-plugins|guanyin-plugins-v2|guanyin-plugins-v3|guanyin-plugins-v4|guanyin-plugins-v5)' "$runtime_marker"; then
+  && grep -qx 'profile=guanyin-plugins-v7' "$seed_marker"; then
+  if grep -Eqx 'profile=(official-core|guanyin-plugins|guanyin-plugins-v2|guanyin-plugins-v3|guanyin-plugins-v4|guanyin-plugins-v5|guanyin-plugins-v6)' "$runtime_marker"; then
     # Upgrade only the managed Web profile. Sessions, workspace files and all
     # other persisted runtime state remain untouched.
     cp -R "$seed_home/profiles/web/." "$runtime_home/profiles/web/"
