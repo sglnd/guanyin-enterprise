@@ -32,6 +32,10 @@ window.__ModuleLoader__.load({
       [/DeepSeek Harness/gi, '观因工作空间'],
       [/DeepSeek-Harness/gi, '观因工作空间'],
       [/\bDSH\b/g, '观因工作空间'],
+      [/探索并理解代码/g, '智能运维'],
+      [/构建新功能、应用或工具/g, '办公提效'],
+      [/审查代码并提出修改建议/g, '应用构建'],
+      [/修复问题和失败/g, '代码审查'],
     ]
 
     let identity
@@ -161,11 +165,11 @@ window.__ModuleLoader__.load({
       })
 
       matching(root, '[class*="_titleGroup"]').forEach((group) => {
-        const title = [...group.children].find((element) => ['探索未至之境', '让智能，安全服务每个团队。'].includes(textOf(element)))
+        const title = [...group.children].find((element) => ['探索未至之境', '让智能，安全服务每个团队。', '让智能，可信地服务每个团队。'].includes(textOf(element)))
         if (!title) return
         const sourceLogo = group.previousElementSibling
         if (sourceLogo && !sourceLogo.matches('.dcu-guanyin-logo--hero')) sourceLogo.remove()
-        title.textContent = '让智能，安全服务每个团队。'
+        title.textContent = '让智能，可信地服务每个团队。'
         ;[...group.children].forEach((element) => {
           if (element !== title) element.remove()
         })
@@ -189,7 +193,7 @@ window.__ModuleLoader__.load({
         .dcu-guanyin-logo--hero { width:35px; height:35px; color:var(--dsw-alias-label-primary,#fff); }
         [class*="_titleGroup"]::before { display:none!important; content:none!important; }
         .dcu-brand[data-guanyin-brand=true] strong { overflow:hidden; font-size:18px; line-height:24px; font-weight:650; letter-spacing:.08em; text-overflow:ellipsis; white-space:nowrap; }
-        .dcu-guanyin-identity { position:relative; left:-16px; display:grid; grid-template-columns:24px minmax(0,1fr); gap:8px; align-items:center; width:calc(100% + 32px); box-sizing:border-box; margin:0; padding:11px 16px; border-top:1px solid var(--dcu-sidebar-border); color:var(--dcu-sidebar-primary); text-align:left; text-decoration:none; }
+        .dcu-guanyin-identity { position:relative; left:-16px; z-index:4; display:grid; grid-template-columns:24px minmax(0,1fr); gap:8px; align-items:center; width:calc(100% + 32px); box-sizing:border-box; margin:0; padding:11px 16px; border-top:1px solid var(--dcu-sidebar-border); color:var(--dcu-sidebar-primary); cursor:pointer; pointer-events:auto; text-align:left; text-decoration:none; }
         .dcu-guanyin-back { display:grid; place-items:center; width:24px; height:24px; color:var(--dcu-sidebar-secondary); }
         .dcu-guanyin-back svg { width:18px; height:18px; }
         .dcu-guanyin-copy { display:flex; flex-direction:column; min-width:0; line-height:1.35; }
@@ -256,6 +260,13 @@ window.__ModuleLoader__.load({
       const start = () => {
         enforcePolicy()
         void loadIdentity()
+        const returnToGuanyin = (event) => {
+          if (!event.target.closest?.('[data-guanyin-identity]')) return
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          window.location.assign(new URL('/console', window.location.origin).href)
+        }
+        document.addEventListener('click', returnToGuanyin, true)
         const pendingRoots = new Set()
         let timer
         const flush = () => {
@@ -274,7 +285,7 @@ window.__ModuleLoader__.load({
           if (pendingRoots.size && timer === undefined) timer = setTimeout(flush, 100)
         })
         observer.observe(document.documentElement, { childList: true, characterData: true, subtree: true })
-        return () => { observer.disconnect(); if (timer !== undefined) clearTimeout(timer) }
+        return () => { observer.disconnect(); document.removeEventListener('click', returnToGuanyin, true); if (timer !== undefined) clearTimeout(timer) }
       }
 
       if (document.documentElement) {
