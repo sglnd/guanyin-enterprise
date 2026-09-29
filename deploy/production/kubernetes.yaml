@@ -1,0 +1,283 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: guanyin-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: guanyin-instances
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: guanyin-control-plane
+  namespace: guanyin-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guanyin-instance-manager
+  namespace: guanyin-instances
+rules:
+  - apiGroups: [""]
+    resources: ["services", "secrets", "configmaps", "persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "create", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guanyin-instance-manager
+  namespace: guanyin-instances
+subjects:
+  - kind: ServiceAccount
+    name: guanyin-control-plane
+    namespace: guanyin-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: guanyin-instance-manager
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guanyin-production-config
+  namespace: guanyin-system
+data:
+  # 部署前改为实际访问域名；多个域名以英文逗号分隔，不要包含协议或路径。
+  trustedHosts: guanyin.example.com
+  # 留空使用集群默认 StorageClass；也可填写生产 CSI StorageClass 名称。
+  dshStorageClass: ""
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guanyin-postgres
+  namespace: guanyin-system
+spec:
+  clusterIP: None
+  selector:
+    app: guanyin-postgres
+  ports:
+    - name: postgres
+      port: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: guanyin-postgres
+  namespace: guanyin-system
+spec:
+  serviceName: guanyin-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: guanyin-postgres
+  template:
+    metadata:
+      labels:
+        app: guanyin-postgres
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: postgres:17.6-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              valueFrom: { secretKeyRef: { name: guanyin-database, key: username } }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: guanyin-database, key: password } }
+            - name: POSTGRES_DB
+              valueFrom: { secretKeyRef: { name: guanyin-database, key: database } }
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "guanyin"] }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 20Gi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guanyin-control-plane
+  namespace: guanyin-system
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  selector:
+    matchLabels:
+      app: guanyin-control-plane
+  template:
+    metadata:
+      labels:
+        app: guanyin-control-plane
+    spec:
+      serviceAccountName: guanyin-control-plane
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: control-plane
+          image: guanyin/control-plane:0.7.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: BOOTSTRAP_ADMIN_USER
+              value: admin
+            - name: BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: guanyin-database, key: bootstrapAdminPassword } }
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: guanyin-database, key: url } }
+            - name: DSH_IMAGE
+              value: bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64
+            - name: DSH_IMAGE_PULL_POLICY
+              value: IfNotPresent
+            - name: DSH_VERSION
+              value: 0.1.5-rc.2
+            - name: DSH_NAMESPACE
+              value: guanyin-instances
+            - name: DSH_TRUSTED_HOSTS
+              valueFrom: { configMapKeyRef: { name: guanyin-production-config, key: trustedHosts } }
+            - name: DSH_STORAGE_CLASS
+              valueFrom: { configMapKeyRef: { name: guanyin-production-config, key: dshStorageClass } }
+            - name: DSH_PERMISSION_MODE
+              value: danger-full-access
+            - name: IDLE_TIMEOUT_MINUTES
+              value: "60"
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+      terminationGracePeriodSeconds: 20
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: guanyin-control-plane
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: guanyin-control-plane
+  namespace: guanyin-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: guanyin-control-plane
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: guanyin-postgres-backups
+  namespace: guanyin-system
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests: { storage: 20Gi }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: guanyin-postgres-backup
+  namespace: guanyin-system
+spec:
+  schedule: "15 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: backup
+              image: postgres:17.6-alpine
+              imagePullPolicy: IfNotPresent
+              command: ["sh", "-ec"]
+              args:
+                - pg_dump --format=custom --file="/backups/guanyin-$(date -u +%Y%m%dT%H%M%SZ).dump" "$DATABASE_URL"; find /backups -type f -name '*.dump' -mtime +14 -delete
+              env:
+                - name: DATABASE_URL
+                  valueFrom: { secretKeyRef: { name: guanyin-database, key: url } }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { cpu: 500m, memory: 256Mi }
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: guanyin-postgres-backups
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guanyin-control-plane
+  namespace: guanyin-system
+spec:
+  type: ClusterIP
+  selector:
+    app: guanyin-control-plane
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

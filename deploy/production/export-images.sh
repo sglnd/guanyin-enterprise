@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+release="${GUANYIN_RELEASE:-0.7.0}"
+output_dir="${1:-dist/guanyin-${release}-offline}"
+images="guanyin/control-plane:0.7.0 bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64 postgres:17.6-alpine"
+
+mkdir -p "$output_dir"
+: > "$output_dir/image-list.txt"
+architecture=""
+for image in $images; do
+  docker image inspect "$image" >/dev/null
+  current="$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')"
+  if [ -z "$architecture" ]; then architecture="$current"; fi
+  if [ "$current" != "$architecture" ]; then
+    echo "镜像架构不一致：$image 是 $current，其他镜像是 $architecture" >&2
+    exit 1
+  fi
+  digest="$(docker image inspect "$image" --format '{{.Id}}')"
+  printf '%s %s %s\n' "$image" "$current" "$digest" >> "$output_dir/image-list.txt"
+done
+
+printf '%s\n' "$architecture" > "$output_dir/platform.txt"
+echo "正在导出 $architecture 镜像，文件较大，请稍候……"
+docker save $images | gzip -1 > "$output_dir/images.tar.gz"
+cp deploy/production/kubernetes.yaml "$output_dir/kubernetes.yaml"
+cp deploy/production/import-images.sh "$output_dir/import-images.sh"
+cp docs/production-kubernetes-deployment.md "$output_dir/部署说明.md"
+chmod 0755 "$output_dir/import-images.sh"
+(cd "$output_dir" && shasum -a 256 images.tar.gz kubernetes.yaml import-images.sh image-list.txt platform.txt 部署说明.md > SHA256SUMS)
+echo "离线交付包已生成：$output_dir"

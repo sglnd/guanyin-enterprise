@@ -15,6 +15,8 @@ const PUBLIC_DIR = process.env.PUBLIC_DIR || '/app/public'
 const NAMESPACE = process.env.DSH_NAMESPACE || 'guanyin-instances'
 const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64'
 const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2'
+const DSH_IMAGE_PULL_POLICY = process.env.DSH_IMAGE_PULL_POLICY || 'IfNotPresent'
+const DSH_STORAGE_CLASS = process.env.DSH_STORAGE_CLASS || ''
 const PUBLIC_HOSTS = process.env.DSH_TRUSTED_HOSTS || 'localhost:18080,127.0.0.1:18080'
 const DSH_PERMISSION_MODE = process.env.DSH_PERMISSION_MODE || 'danger-full-access'
 const API_BUILDER_MCP_URL = process.env.API_BUILDER_MCP_URL || 'http://guanyin-control-plane.guanyin-system.svc.cluster.local:18080/internal/mcp/api-builder'
@@ -329,9 +331,9 @@ async function provision(instance) {
   await createResource('Secret', { apiVersion: 'v1', kind: 'Secret', metadata: { name, labels }, stringData: { extensionToken: randomBytes(32).toString('hex') } })
   const mcpName = mcpResourceName(instance)
   await createResource('ConfigMap', { apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: mcpName, labels }, data: { 'config.json': JSON.stringify({ revision: 'initial', servers: [] }) } })
-  for (const suffix of ['data', 'home']) await createResource('PersistentVolumeClaim', {
+  for (const suffix of ['data', 'home', 'workspace']) await createResource('PersistentVolumeClaim', {
     apiVersion: 'v1', kind: 'PersistentVolumeClaim', metadata: { name: `${name}-${suffix}`, labels },
-    spec: { accessModes: ['ReadWriteOnce'], resources: { requests: { storage: '2Gi' } } },
+    spec: { accessModes: ['ReadWriteOnce'], ...(DSH_STORAGE_CLASS ? { storageClassName: DSH_STORAGE_CLASS } : {}), resources: { requests: { storage: '2Gi' } } },
   })
   await createResource('Service', { apiVersion: 'v1', kind: 'Service', metadata: { name, labels }, spec: { selector: labels, ports: [{ name: 'web', port: 3080, targetPort: 3080 }] } })
   await createResource('Deployment', {
@@ -340,7 +342,7 @@ async function provision(instance) {
     // update never starts two DSH processes against the same home/data PVCs.
     spec: { replicas: 1, strategy: { type: 'Recreate' }, selector: { matchLabels: labels }, template: { metadata: { labels }, spec: {
       securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, fsGroupChangePolicy: 'OnRootMismatch', seccompProfile: { type: 'RuntimeDefault' } },
-      containers: [{ name: 'dsh', image: DSH_IMAGE, imagePullPolicy: 'Never', ports: [{ containerPort: 3080 }],
+      containers: [{ name: 'dsh', image: DSH_IMAGE, imagePullPolicy: DSH_IMAGE_PULL_POLICY, ports: [{ containerPort: 3080 }],
         env: [
           { name: 'DSH_HOME', value: '/data/dsh' }, { name: 'BANKOPS_WEB_PROXY', value: '1' },
           { name: 'DSH_BROWSER_AUTH_MODE', value: 'trusted-host' }, { name: 'DSH_TRUSTED_HOSTS', value: PUBLIC_HOSTS },
@@ -356,7 +358,7 @@ async function provision(instance) {
         volumeMounts: [{ name: 'data', mountPath: '/data/dsh' }, { name: 'home', mountPath: '/home/node' }, { name: 'workspace', mountPath: '/workspace' },
           { name: 'guanyin-mcp-config', mountPath: '/etc/guanyin/mcp', readOnly: true }],
       }],
-      volumes: [{ name: 'data', persistentVolumeClaim: { claimName: `${name}-data` } }, { name: 'home', persistentVolumeClaim: { claimName: `${name}-home` } }, { name: 'workspace', emptyDir: {} },
+      volumes: [{ name: 'data', persistentVolumeClaim: { claimName: `${name}-data` } }, { name: 'home', persistentVolumeClaim: { claimName: `${name}-home` } }, { name: 'workspace', persistentVolumeClaim: { claimName: `${name}-workspace` } },
         { name: 'guanyin-mcp-config', configMap: { name: mcpName } }],
     } } },
   })

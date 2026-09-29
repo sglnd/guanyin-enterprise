@@ -6,7 +6,7 @@
 
 - 本仓库：观因控制平面、Web 控制台、PostgreSQL 数据模型和 Kubernetes 部署。
 - DSH 仓库：构建和发布 `bankops/deepseek-harness-agent` 镜像。
-- 一个 DSH 空间对应一个 Deployment、Service、Secret 和两块持久卷。
+- 一个 DSH 空间对应一个 Deployment、Service、Secret 和三块持久卷，分别保存 DSH 数据、用户主目录和工作区文件。
 - 用户与空间是多对多关系，成员角色分为负责人、运维者和成员。
 - 空间可独立配置永不休眠或空闲一段时间后缩容到 0。
 - MCP 管理员可登记 Streamable HTTP MCP；平台管理员、空间负责人和运维者可将已启用 MCP 接入空间，控制面以 ConfigMap/Secret 注入 DSH 并刷新对应空间。
