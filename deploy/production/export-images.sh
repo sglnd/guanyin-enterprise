@@ -3,7 +3,10 @@ set -eu
 
 release="${GUANYIN_RELEASE:-0.7.0}"
 output_dir="${1:-dist/guanyin-${release}-offline}"
-images="guanyin/control-plane:0.7.0 bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64 postgres:17.6-alpine"
+control_plane_image="${CONTROL_PLANE_IMAGE:-guanyin/control-plane:0.7.0}"
+dsh_image="${DSH_IMAGE:-bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64}"
+postgres_image="${POSTGRES_IMAGE:-postgres:17.6-alpine}"
+images="$control_plane_image $dsh_image $postgres_image"
 
 mkdir -p "$output_dir"
 : > "$output_dir/image-list.txt"
@@ -24,8 +27,14 @@ printf '%s\n' "$architecture" > "$output_dir/platform.txt"
 echo "正在导出 $architecture 镜像，文件较大，请稍候……"
 docker save $images | gzip -1 > "$output_dir/images.tar.gz"
 cp deploy/production/kubernetes.yaml "$output_dir/kubernetes.yaml"
+sed "s#guanyin/control-plane:0.7.0#$control_plane_image#g; s#bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64#$dsh_image#g; s#postgres:17.6-alpine#$postgres_image#g" \
+  "$output_dir/kubernetes.yaml" > "$output_dir/kubernetes.yaml.tmp"
+mv "$output_dir/kubernetes.yaml.tmp" "$output_dir/kubernetes.yaml"
 cp deploy/production/import-images.sh "$output_dir/import-images.sh"
 cp docs/production-kubernetes-deployment.md "$output_dir/部署说明.md"
+sed "s#guanyin/control-plane:0.7.0#$control_plane_image#g; s#bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64#$dsh_image#g; s#postgres:17.6-alpine#$postgres_image#g" \
+  "$output_dir/部署说明.md" > "$output_dir/部署说明.md.tmp"
+mv "$output_dir/部署说明.md.tmp" "$output_dir/部署说明.md"
 chmod 0755 "$output_dir/import-images.sh"
 (cd "$output_dir" && shasum -a 256 images.tar.gz kubernetes.yaml import-images.sh image-list.txt platform.txt 部署说明.md > SHA256SUMS)
 echo "离线交付包已生成：$output_dir"

@@ -1,4 +1,5 @@
-FROM bankops/deepseek-harness-agent:0.1.7-alpha.2-core-arm64
+ARG BASE_IMAGE=bankops/deepseek-harness-agent:0.1.7-alpha.2-core-arm64
+FROM ${BASE_IMAGE}
 
 ARG DSH_VERSION=0.1.5-rc.2
 ARG DSH_RESOLVE_BEFORE=2026-09-11T00:00:00.000Z

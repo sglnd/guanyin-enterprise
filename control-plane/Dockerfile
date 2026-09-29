@@ -1,4 +1,5 @@
-FROM node:24-alpine
+ARG BASE_IMAGE=node:24-alpine
+FROM ${BASE_IMAGE}
 
 ENV NODE_ENV=production
 WORKDIR /app

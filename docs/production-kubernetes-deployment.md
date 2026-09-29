@@ -8,13 +8,15 @@
 - `bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64`
 - `postgres:17.6-alpine`
 
-`image-list.txt` 和 `platform.txt` 记录交付包的镜像 ID 与 CPU 架构。当前 DSH 标签明确为 ARM64，因此当前离线包只能部署到 `linux/arm64` 节点。先在生产集群执行：
+`image-list.txt` 和 `platform.txt` 记录交付包的实际镜像名称、镜像 ID 与 CPU 架构。每个离线包只能部署到 `platform.txt` 所列架构的节点。先在生产集群执行：
 
 ```bash
 kubectl get nodes -o custom-columns=NAME:.metadata.name,ARCH:.status.nodeInfo.architecture,RUNTIME:.status.nodeInfo.containerRuntime
 ```
 
-三个节点的 `ARCH` 必须与 `platform.txt` 一致。若生产节点为 `amd64`，必须先构建三张 amd64 镜像并修改清单中的 DSH 镜像标签，不能直接导入 ARM64 包。
+三个节点的 `ARCH` 必须与 `platform.txt` 一致。架构不匹配时必须换用对应架构的完整交付包，不能通过修改镜像标签混用。
+
+仓库的导出脚本支持通过 `CONTROL_PLANE_IMAGE`、`DSH_IMAGE` 和 `POSTGRES_IMAGE` 生成不同架构的独立交付包，并会同步改写包内 Kubernetes 清单中的镜像引用。
 
 ## 2. 存储前置检查
 
