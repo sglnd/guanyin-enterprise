@@ -189,6 +189,12 @@ spec:
               value: localhost:18080,127.0.0.1:18080
             - name: DSH_PERMISSION_MODE
               value: danger-full-access
+            - name: DSH_DATA_PVC_SIZE
+              value: 2Gi
+            - name: DSH_HOME_PVC_SIZE
+              value: 2Gi
+            - name: DSH_WORKSPACE_PVC_SIZE
+              value: 2Gi
             - name: IDLE_TIMEOUT_MINUTES
               value: "60"
           readinessProbe:

@@ -51,6 +51,10 @@ data:
   trustedHosts: guanyin.example.com
   # 留空使用集群默认 StorageClass；也可填写生产 CSI StorageClass 名称。
   dshStorageClass: ""
+  # 以下参数只影响新建空间；已有 PVC 需要按存储系统能力单独扩容。
+  dshDataPvcSize: 5Gi
+  dshHomePvcSize: 5Gi
+  dshWorkspacePvcSize: 20Gi
 ---
 apiVersion: v1
 kind: Service
@@ -89,7 +93,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: postgres
-          image: postgres:17.6-alpine
+          image: guanyin/postgres:17.6-alpine-amd64
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5432
@@ -151,7 +155,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: control-plane
-          image: guanyin/control-plane:0.7.0
+          image: guanyin/control-plane:0.7.0-amd64
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -163,7 +167,7 @@ spec:
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: guanyin-database, key: url } }
             - name: DSH_IMAGE
-              value: bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64
+              value: bankops/guanyin-dsh:0.1.5-rc.2-gy.1-amd64
             - name: DSH_IMAGE_PULL_POLICY
               value: IfNotPresent
             - name: DSH_VERSION
@@ -174,6 +178,12 @@ spec:
               valueFrom: { configMapKeyRef: { name: guanyin-production-config, key: trustedHosts } }
             - name: DSH_STORAGE_CLASS
               valueFrom: { configMapKeyRef: { name: guanyin-production-config, key: dshStorageClass } }
+            - name: DSH_DATA_PVC_SIZE
+              valueFrom: { configMapKeyRef: { name: guanyin-production-config, key: dshDataPvcSize } }
+            - name: DSH_HOME_PVC_SIZE
+              valueFrom: { configMapKeyRef: { name: guanyin-production-config, key: dshHomePvcSize } }
+            - name: DSH_WORKSPACE_PVC_SIZE
+              valueFrom: { configMapKeyRef: { name: guanyin-production-config, key: dshWorkspacePvcSize } }
             - name: DSH_PERMISSION_MODE
               value: danger-full-access
             - name: IDLE_TIMEOUT_MINUTES
@@ -246,7 +256,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: backup
-              image: postgres:17.6-alpine
+              image: guanyin/postgres:17.6-alpine-amd64
               imagePullPolicy: IfNotPresent
               command: ["sh", "-ec"]
               args:

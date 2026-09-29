@@ -17,6 +17,16 @@ const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-dsh:0.1.5-rc.2-gy.1-
 const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2'
 const DSH_IMAGE_PULL_POLICY = process.env.DSH_IMAGE_PULL_POLICY || 'IfNotPresent'
 const DSH_STORAGE_CLASS = process.env.DSH_STORAGE_CLASS || ''
+const pvcSize = (name, fallback = '2Gi') => {
+  const value = String(process.env[name] || fallback).trim()
+  if (!/^[1-9]\d*(Mi|Gi|Ti)$/.test(value)) throw new Error(`${name} 必须是正整数容量，例如 2Gi、20Gi 或 1Ti`)
+  return value
+}
+const DSH_PVC_SIZES = {
+  data: pvcSize('DSH_DATA_PVC_SIZE'),
+  home: pvcSize('DSH_HOME_PVC_SIZE'),
+  workspace: pvcSize('DSH_WORKSPACE_PVC_SIZE'),
+}
 const PUBLIC_HOSTS = process.env.DSH_TRUSTED_HOSTS || 'localhost:18080,127.0.0.1:18080'
 const DSH_PERMISSION_MODE = process.env.DSH_PERMISSION_MODE || 'danger-full-access'
 const API_BUILDER_MCP_URL = process.env.API_BUILDER_MCP_URL || 'http://guanyin-control-plane.guanyin-system.svc.cluster.local:18080/internal/mcp/api-builder'
@@ -333,7 +343,7 @@ async function provision(instance) {
   await createResource('ConfigMap', { apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: mcpName, labels }, data: { 'config.json': JSON.stringify({ revision: 'initial', servers: [] }) } })
   for (const suffix of ['data', 'home', 'workspace']) await createResource('PersistentVolumeClaim', {
     apiVersion: 'v1', kind: 'PersistentVolumeClaim', metadata: { name: `${name}-${suffix}`, labels },
-    spec: { accessModes: ['ReadWriteOnce'], ...(DSH_STORAGE_CLASS ? { storageClassName: DSH_STORAGE_CLASS } : {}), resources: { requests: { storage: '2Gi' } } },
+    spec: { accessModes: ['ReadWriteOnce'], ...(DSH_STORAGE_CLASS ? { storageClassName: DSH_STORAGE_CLASS } : {}), resources: { requests: { storage: DSH_PVC_SIZES[suffix] } } },
   })
   await createResource('Service', { apiVersion: 'v1', kind: 'Service', metadata: { name, labels }, spec: { selector: labels, ports: [{ name: 'web', port: 3080, targetPort: 3080 }] } })
   await createResource('Deployment', {

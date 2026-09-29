@@ -4,9 +4,9 @@
 
 运行时仅需要三张镜像：
 
-- `guanyin/control-plane:0.7.0`
-- `bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64`
-- `postgres:17.6-alpine`
+- `guanyin/control-plane:0.7.0-amd64`
+- `bankops/guanyin-dsh:0.1.5-rc.2-gy.1-amd64`
+- `guanyin/postgres:17.6-alpine-amd64`
 
 `image-list.txt` 和 `platform.txt` 记录交付包的实际镜像名称、镜像 ID 与 CPU 架构。每个离线包只能部署到 `platform.txt` 所列架构的节点。先在生产集群执行：
 
@@ -17,6 +17,7 @@ kubectl get nodes -o custom-columns=NAME:.metadata.name,ARCH:.status.nodeInfo.ar
 三个节点的 `ARCH` 必须与 `platform.txt` 一致。架构不匹配时必须换用对应架构的完整交付包，不能通过修改镜像标签混用。
 
 仓库的导出脚本支持通过 `CONTROL_PLANE_IMAGE`、`DSH_IMAGE` 和 `POSTGRES_IMAGE` 生成不同架构的独立交付包，并会同步改写包内 Kubernetes 清单中的镜像引用。
+默认不带参数执行时只生成 amd64 交付目录；只有明确设置三张 ARM64 镜像时才会导出 ARM64 包。
 
 ## 2. 存储前置检查
 
@@ -29,7 +30,7 @@ kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.sto
 
 如果没有默认 StorageClass，在 `kubernetes.yaml` 的 `guanyin-production-config` 中填写 `dshStorageClass`，并给 PostgreSQL 与备份 PVC 的 `spec.storageClassName` 填写同一 CSI StorageClass。不要使用仅绑定单节点、节点损坏后无法重挂载的本地盘方案。
 
-每个空间会动态创建三个 2Gi PVC：`data` 保存 DSH 配置与会话，`home` 保存用户主目录，`workspace` 保存工作区文件。
+每个空间会动态创建三个 PVC：`data` 保存 DSH 配置与会话，`home` 保存用户主目录，`workspace` 保存工作区文件。容量通过生产 ConfigMap 中的 `dshDataPvcSize`、`dshHomePvcSize` 和 `dshWorkspacePvcSize` 分别设置；只接受 `Mi`、`Gi` 或 `Ti` 的正整数容量，例如 `512Mi`、`5Gi`、`1Ti`。
 
 ## 3. 校验并导入离线镜像
 
@@ -79,7 +80,7 @@ unset DB_PASSWORD ADMIN_PASSWORD DB_URL
 
 1. 把 `trustedHosts` 改成真实域名，例如 `guanyin.example.com`；多个域名用英文逗号分隔。
 2. 确认 DSH 镜像标签与节点架构一致。
-3. 按存储规划设置 StorageClass 和容量。
+3. 按存储规划设置 `dshStorageClass` 和三个 DSH PVC 容量参数。配置只影响新建空间；已有 PVC 不会自动调整。
 4. 如果使用私有镜像仓库，将三处镜像名改成仓库地址，并配置 `imagePullSecrets`。
 
 执行：
