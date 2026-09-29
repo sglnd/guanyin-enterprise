@@ -224,6 +224,15 @@ async function instanceExtensionToken(instance) {
   return token
 }
 
+async function removeMcpEntries(instance, id) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const current = await callMcpManager(instance, 'list')
+    if (!(current.servers || []).some(item => item.id === id)) return
+    await callMcpManager(instance, 'remove', { id })
+  }
+  throw new Error(`MCP 配置 ${id} 存在重复项，自动清理失败`)
+}
+
 async function applySpaceMcp(instance) {
   const name = mcpResourceName(instance)
   const labels = { 'app.kubernetes.io/name': 'dsh', 'guanyin.io/instance': instance.id, 'guanyin.io/config': 'mcp' }
@@ -245,10 +254,15 @@ async function applySpaceMcp(instance) {
   } }
   desired.set(apiBuilder.id, apiBuilder)
   const managed = (current.servers || []).filter(item => item.id.startsWith('guanyin-mcp-'))
-  for (const item of managed) if (!desired.has(item.id)) await callMcpManager(instance, 'remove', { id: item.id })
+  for (const id of new Set(managed.filter(item => !desired.has(item.id)).map(item => item.id))) {
+    await removeMcpEntries(instance, id)
+  }
   for (const entry of desired.values()) {
-    const existing = managed.find(item => item.id === entry.id)
-    await callMcpManager(instance, existing ? 'update' : 'add', entry)
+    const existing = managed.filter(item => item.id === entry.id)
+    const unchanged = existing.length === 1 && JSON.stringify(existing[0].config || {}) === JSON.stringify(entry.config)
+    if (unchanged) continue
+    if (existing.length) await removeMcpEntries(instance, entry.id)
+    await callMcpManager(instance, 'add', entry)
   }
   return revision
 }

@@ -29,7 +29,7 @@ COPY deploy/dsh-0.1.5-core/finalize-profile.mjs /tmp/finalize-profile.mjs
 COPY deploy/dsh-0.1.5-core/guanyin-ui-policy/build-policy.json /tmp/guanyin-ui-build-policy.json
 
 RUN --mount=type=cache,target=/root/.npm export DSH_HOME=/opt/dsh-seed \
-    && printf '%s\n' "dsh=${DSH_VERSION}" "profile=guanyin-plugins-v11" > /opt/dsh-seed/.bankops-release \
+    && printf '%s\n' "dsh=${DSH_VERSION}" "profile=guanyin-plugins-v12" > /opt/dsh-seed/.bankops-release \
     && cp /tmp/guanyin-profile-package.json /opt/dsh-seed/profiles/web/package.json \
     && npm install --prefix /opt/dsh-seed/profiles/web --ignore-scripts --legacy-peer-deps --no-audit --no-fund \
     && node /tmp/finalize-profile.mjs /opt/dsh-seed/profiles/web /tmp/guanyin-ui-build-policy.json \
@@ -56,8 +56,8 @@ LABEL org.opencontainers.image.title="Guanyin DSH workspace runtime" \
       org.opencontainers.image.version="0.1.5-rc.2-gy.1" \
       io.deepseek-harness.version="0.1.5-rc.2" \
       io.guanyin.identity-contract="1" \
-      io.guanyin.branding="0.2.5" \
-      io.guanyin.profile="guanyin-plugins-v11" \
+      io.guanyin.branding="0.2.6" \
+      io.guanyin.profile="guanyin-plugins-v12" \
       io.guanyin.better-sidebar="0.18.0" \
       io.guanyin.univer="absent" \
       io.guanyin.agency-agents="absent" \

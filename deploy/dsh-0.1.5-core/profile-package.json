@@ -3,7 +3,7 @@
   "private": true,
   "dependencies": {
     "@changfenhuang/dsh-genui": "file:/opt/guanyin-plugins/changfenhuang-dsh-genui-0.11.0.tgz",
-    "@guanyin/dsh-ui-policy": "file:/opt/guanyin-plugins/guanyin-dsh-ui-policy-0.2.5.tgz",
+    "@guanyin/dsh-ui-policy": "file:/opt/guanyin-plugins/guanyin-dsh-ui-policy-0.2.6.tgz",
     "@js2hou/dsh-mcp-manager": "file:/opt/guanyin-plugins/js2hou-dsh-mcp-manager-0.1.5.tgz",
     "@michengai/dsh-archive-manager": "file:/opt/guanyin-plugins/michengai-dsh-archive-manager-1.0.5.tgz",
     "@michengai/dsh-automation": "file:/opt/guanyin-plugins/michengai-dsh-automation-0.1.50.tgz",

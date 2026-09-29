@@ -38,6 +38,13 @@ window.__ModuleLoader__.load({
       [/修复问题和失败/g, '代码审查'],
     ]
 
+    const scenarioDescriptions = [
+      { legacy: ['了解项目结构', '理解一项功能'], text: '系统巡检、故障诊断、日志分析和处置建议。' },
+      { legacy: ['实现一项新功能', '构建一个小工具'], text: '材料撰写、信息整理、数据分析和工作总结。' },
+      { legacy: ['评审当前改动', '检查代码质量'], text: '创建业务应用、自动化工具和系统集成。' },
+      { legacy: ['排查一个问题', '修复失败的测试'], text: '分析代码质量、安全风险并给出修改建议。' },
+    ]
+
     let identity
     let identityRequested = false
 
@@ -109,6 +116,24 @@ window.__ModuleLoader__.load({
       matching(root, 'button, [role="tab"], [role="menuitem"], a').forEach((element) => {
         if (hiddenSettingsLabels.has(textOf(element)) && isSettingsSurface(element)) element.remove()
       })
+    }
+
+    function replaceScenarioSuggestions(root) {
+      for (const scenario of scenarioDescriptions) {
+        const legacyButtons = matching(root, 'button').filter((button) => scenario.legacy.includes(textOf(button)))
+        if (!legacyButtons.length) continue
+        let host = legacyButtons[0].parentElement
+        while (host && !legacyButtons.every((button) => host.contains(button))) host = host.parentElement
+        if (!host) continue
+        legacyButtons.forEach((button) => button.remove())
+        host.querySelector('[data-guanyin-scenario-description]')?.remove()
+        const description = document.createElement('p')
+        description.dataset.guanyinScenarioDescription = 'true'
+        description.dataset.guanyinManaged = 'true'
+        description.className = 'dcu-guanyin-scenario-description'
+        description.textContent = scenario.text
+        host.append(description)
+      }
     }
 
     function branded(value) {
@@ -191,6 +216,7 @@ window.__ModuleLoader__.load({
         .dcu-brand[data-guanyin-brand=true] { gap:9px; color:var(--dcu-sidebar-primary); }
         .dcu-guanyin-logo { display:inline-block; flex:none; width:25px; height:25px; color:inherit; background:currentColor; -webkit-mask:url('/__guanyin/brand/logo.png') center/contain no-repeat; mask:url('/__guanyin/brand/logo.png') center/contain no-repeat; }
         .dcu-guanyin-logo--hero { width:35px; height:35px; color:var(--dsw-alias-label-primary,#fff); }
+        .dcu-guanyin-scenario-description { width:100%; box-sizing:border-box; margin:0; padding:12px 16px; border:1px solid var(--dsw-alias-border-primary,rgba(255,255,255,.12)); border-radius:12px; color:var(--dsw-alias-label-secondary,rgba(255,255,255,.72)); font-size:14px; line-height:1.6; }
         [class*="_titleGroup"]::before { display:none!important; content:none!important; }
         .dcu-brand[data-guanyin-brand=true] strong { overflow:hidden; font-size:18px; line-height:24px; font-weight:650; letter-spacing:.08em; text-overflow:ellipsis; white-space:nowrap; }
         .dcu-guanyin-identity { position:relative; left:-16px; z-index:4; display:grid; grid-template-columns:24px minmax(0,1fr); gap:8px; align-items:center; width:calc(100% + 32px); box-sizing:border-box; margin:0; padding:11px 16px; border-top:1px solid var(--dcu-sidebar-border); color:var(--dcu-sidebar-primary); cursor:pointer; pointer-events:auto; text-align:left; text-decoration:none; }
@@ -251,6 +277,7 @@ window.__ModuleLoader__.load({
       removePluginExternalActions(root)
       removeContextPluginInfo(root)
       removeManagedSettings(root)
+      replaceScenarioSuggestions(root)
       renderIdentityFooter()
     }
 
