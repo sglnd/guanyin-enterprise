@@ -78,10 +78,11 @@ unset DB_PASSWORD ADMIN_PASSWORD DB_URL
 
 编辑 `kubernetes.yaml`：
 
-1. 把 `trustedHosts` 改成真实域名，例如 `guanyin.example.com`；多个域名用英文逗号分隔。
-2. 确认 DSH 镜像标签与节点架构一致。
-3. 按存储规划设置 `dshStorageClass` 和三个 DSH PVC 容量参数。配置只影响新建空间；已有 PVC 不会自动调整。
-4. 如果使用私有镜像仓库，将三处镜像名改成仓库地址，并配置 `imagePullSecrets`。
+1. 将 `licensePublicKey` 替换为内部签发系统生成的 Ed25519 公钥。不要把私钥或客户 License 写入 YAML。
+2. 把 `trustedHosts` 改成真实域名，例如 `guanyin.example.com`；多个域名用英文逗号分隔。
+3. 确认 DSH 镜像标签与节点架构一致。
+4. 按存储规划设置 `dshStorageClass` 和三个 DSH PVC 容量参数。配置只影响新建空间；已有 PVC 不会自动调整。
+5. 如果使用私有镜像仓库，将三处镜像名改成仓库地址，并配置 `imagePullSecrets`。
 
 执行：
 
@@ -107,6 +108,9 @@ kubectl auth can-i create deployments.apps \
 ```
 
 浏览器通过正式 HTTPS 域名登录，立即修改/妥善保管管理员凭证，然后创建一个测试空间。验收以下项目：
+
+- 首次访问先显示企业授权页；错误客户名称、篡改或过期 License 均不能进入账号登录。
+- 有效 License 审核通过后显示账号登录，刷新或重启控制面后授权仍然有效。
 
 - 空间 Pod 进入 `Running/Ready`，并创建三个 PVC。
 - 普通用户只能进入已授权空间，管理员代入访问有审计记录。

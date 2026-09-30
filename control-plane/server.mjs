@@ -9,6 +9,7 @@ import { ApiRunWorker, createDshAdapter, isTerminalApiRun, validateApiInput } fr
 import { generateApiDocumentation, normalizeApiManifest } from './api-contract.mjs'
 import { apiBuilderTools, executeApiBuilderTool, generateApiDraftWithAi } from './api-builder-mcp.mjs'
 import { createIdentityToken, withoutControlPlaneCookies, withoutInboundIdentityHeaders } from './guanyin-identity.mjs'
+import { inspectLicense, normalizeCustomerName, publicLicenseStatus } from './license.mjs'
 
 const PORT = Number(process.env.PORT || 8080)
 const PUBLIC_DIR = process.env.PUBLIC_DIR || '/app/public'
@@ -33,7 +34,14 @@ const API_BUILDER_MCP_URL = process.env.API_BUILDER_MCP_URL || 'http://guanyin-c
 const SESSION_TTL = 12 * 60 * 60 * 1000
 const IDLE_TIMEOUT_MINUTES = Number(process.env.IDLE_TIMEOUT_MINUTES || 60)
 const isDevelopment = process.env.NODE_ENV !== 'production'
+const LICENSE_PUBLIC_KEY = String(process.env.GUANYIN_LICENSE_PUBLIC_KEY || '').replace(/\\n/g, '\n').trim()
 const activeTouches = new Map()
+
+async function licenseStatus() {
+  const saved = await store.enterpriseLicense()
+  if (!saved) return { valid: false, code: 'LICENSE_REQUIRED', message: '请配置客户名称和 License', customerName: '' }
+  return inspectLicense({ customerName: saved.customerName, token: saved.token, publicKey: LICENSE_PUBLIC_KEY })
+}
 
 function hashPassword(password, salt = randomBytes(16).toString('hex')) {
   return `${salt}:${scryptSync(password, salt, 64).toString('hex')}`
@@ -513,7 +521,19 @@ async function openApi(req, res, path) {
 }
 
 async function api(req, res, path) {
+  if (path === '/api/license/status' && req.method === 'GET') return sendJson(res, 200, { license: publicLicenseStatus(await licenseStatus()) })
+  if (path === '/api/license/activate' && req.method === 'POST') {
+    const input = await bodyJson(req)
+    const customerName = normalizeCustomerName(input.customerName)
+    const token = String(input.token || '').trim()
+    const result = inspectLicense({ customerName, token, publicKey: LICENSE_PUBLIC_KEY })
+    if (!result.valid) return sendJson(res, 400, { error: result.message, code: result.code })
+    await store.saveEnterpriseLicense(customerName, token)
+    return sendJson(res, 200, { license: publicLicenseStatus(result) })
+  }
   if (path === '/api/login' && req.method === 'POST') {
+    const license = await licenseStatus()
+    if (!license.valid) return sendJson(res, 403, { error: license.message, code: license.code })
     const input = await bodyJson(req)
     const user = await store.userByUsername(String(input.username || '').trim())
     if (!user || !user.enabled || !verifyPassword(String(input.password || ''), user.passwordHash)) return sendJson(res, 401, { error: '用户名或密码错误' })
@@ -944,6 +964,12 @@ const server = http.createServer(async (req, res) => {
     const path = new URL(req.url, 'http://localhost').pathname
     if (path === '/healthz') return sendJson(res, 200, { ok: true })
     if (path === '/readyz') { await store.health(); return sendJson(res, 200, { ok: true }) }
+    if (path === '/api/license/status' || path === '/api/license/activate') return await api(req, res, path)
+    if (path === '/login' || path === '/console' || path === '/console/' || path.startsWith('/app') || path === '/lifecycle.css' || path === '/guanyin-logo.png') return await staticFile(req, res, path === '/login' ? '/console/' : path)
+    const license = await licenseStatus()
+    if (!license.valid) return path === '/api' || path.startsWith('/api/') || path.startsWith('/openapi/') || path.startsWith('/internal/')
+      ? sendJson(res, 403, { error: license.message, code: license.code })
+      : redirect(res, '/login')
     if (path === '/internal/mcp/api-builder') return await apiBuilderMcp(req, res)
     if (path.startsWith('/openapi/v1/')) return await openApi(req, res, path)
     // DSH owns /api as its RPC carrier.  The control plane owns only its
@@ -957,7 +983,6 @@ const server = http.createServer(async (req, res) => {
       || path.startsWith('/api/api-definitions') || path.startsWith('/api/api-runs/') || path.startsWith('/api/api-builder/') || path === '/api/api-catalog'
       || path.startsWith('/api/admin/')
     if (controlApi) return await api(req, res, path)
-    if (path === '/login' || path === '/console' || path === '/console/' || path.startsWith('/app') || path === '/lifecycle.css' || path === '/guanyin-logo.png') return await staticFile(req, res, path === '/login' ? '/console/' : path)
     const user = await currentUser(req)
     if (!user) return redirect(res, '/login')
     if (path === '/' && !cookies(req).guanyin_instance) return redirect(res, '/console')
@@ -973,6 +998,7 @@ const server = http.createServer(async (req, res) => {
 })
 
 server.on('upgrade', async (req, socket, head) => {
+  if (!(await licenseStatus()).valid) return socket.destroy()
   const instance = await selectedInstance(req)
   if (!instance) return socket.destroy()
   const user = await currentUser(req)

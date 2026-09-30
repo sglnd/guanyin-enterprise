@@ -72,6 +72,11 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
       token_hash text PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       expires_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
     );
+    CREATE TABLE IF NOT EXISTS enterprise_license (
+      singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+      customer_name text NOT NULL, token text NOT NULL,
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
     CREATE TABLE IF NOT EXISTS audit_logs (
       id uuid PRIMARY KEY, actor_user_id uuid NOT NULL REFERENCES users(id),
       action text NOT NULL, target_instance_id uuid REFERENCES instances(id),
@@ -647,5 +652,16 @@ export async function updateApiCredential(id, instanceId, { enabled, maxConcurre
 }
 
 export async function health() { await pool.query('SELECT 1') }
+
+export async function enterpriseLicense() {
+  return (await pool.query('SELECT customer_name AS "customerName",token,updated_at AS "updatedAt" FROM enterprise_license WHERE singleton=true')).rows[0]
+}
+
+export async function saveEnterpriseLicense(customerName, token) {
+  return (await pool.query(`INSERT INTO enterprise_license(singleton,customer_name,token,updated_at)
+    VALUES(true,$1,$2,now()) ON CONFLICT(singleton) DO UPDATE
+    SET customer_name=EXCLUDED.customer_name,token=EXCLUDED.token,updated_at=now()
+    RETURNING customer_name AS "customerName",updated_at AS "updatedAt"`, [customerName, token])).rows[0]
+}
 
 export async function close() { await pool.end() }

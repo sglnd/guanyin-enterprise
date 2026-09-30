@@ -1,6 +1,17 @@
-# 观因（Guanyin Platform）
+# 观因企业版（Guanyin Enterprise）
 
 观因是一个面向内部团队的 DSH 多租户控制平面。它负责用户、租户、共享空间、访问关系、生命周期和审计管理；DSH 本身作为独立版本化镜像运行，不在本仓库构建。
+
+本仓库基于社区版 `guanyin-platform`，增加离线企业 License 登录门禁。未配置、无效或过期的 License 只能访问授权更新页面，不能登录或调用平台、工作空间及 OpenAPI 能力。
+
+## 企业 License
+
+1. 使用内部 `sglnd/guanyin-license-issuer` 生成 Ed25519 密钥对并离线签发客户 License。
+2. 将签发公钥配置到 Kubernetes ConfigMap 的 `licensePublicKey`，私钥不得进入本仓库、镜像或客户集群。
+3. 部署后打开登录页，填写与签发时完全一致的客户名称并粘贴 License。
+4. 校验通过后显示原登录表单；授权配置保存在 PostgreSQL，Pod 重启后仍然有效。
+
+更换或续期时，License 失效后登录页会自动重新显示授权更新表单。
 
 ## 项目边界
 

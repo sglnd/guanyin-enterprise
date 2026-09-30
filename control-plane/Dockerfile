@@ -9,6 +9,7 @@ COPY control-plane/package-lock.json ./package-lock.json
 RUN npm ci --omit=dev && npm cache clean --force
 COPY control-plane/server.mjs ./server.mjs
 COPY control-plane/store.mjs ./store.mjs
+COPY control-plane/license.mjs ./license.mjs
 COPY control-plane/dsh-adapter.mjs ./dsh-adapter.mjs
 COPY control-plane/api-runner.mjs ./api-runner.mjs
 COPY control-plane/api-contract.mjs ./api-contract.mjs

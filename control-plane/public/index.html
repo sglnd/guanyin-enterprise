@@ -15,9 +15,16 @@
       <div class="brand-copy"><span class="eyebrow">GUANYIN AGENT PLATFORM</span><h1>让智能，可信地服务每个团队。</h1><p>统一管理身份、租户与独立智能工作空间，在清晰的边界中释放 Agent 能力。</p></div>
       <div class="brand-foot"><span>安全隔离</span><i></i><span>版本可控</span><i></i><span>简洁协作</span></div>
     </section>
-    <section class="login-panel"><form id="login-form" class="login-card">
+    <section class="login-panel"><form id="license-form" class="login-card hidden">
+      <div class="mobile-brand"><span class="brand-mark"><img src="/guanyin-logo.png" alt=""></span><span>观因企业版</span></div>
+      <span class="eyebrow">企业授权</span><h2>更新 License</h2><p id="license-message">请输入客户名称和离线签发的 License，通过校验后即可登录。</p>
+      <label><span>客户名称</span><input name="customerName" autocomplete="organization" placeholder="请输入完整客户名称" required></label>
+      <label><span>License</span><textarea name="token" rows="6" spellcheck="false" placeholder="请粘贴 License" required></textarea></label>
+      <button type="submit" class="primary full">审核并启用 <span aria-hidden="true">→</span></button><div id="license-error" class="error" role="alert"></div>
+      <div class="login-help">License 由观因授权签发系统离线生成。</div>
+    </form><form id="login-form" class="login-card hidden">
       <div class="mobile-brand"><span class="brand-mark"><img src="/guanyin-logo.png" alt=""></span><span>观因</span></div>
-      <span class="eyebrow">欢迎回来</span><h2>登录工作空间</h2><p>使用管理员为你分配的观因账号继续。</p>
+      <span class="eyebrow">观因企业版</span><h2>登录工作空间</h2><p id="licensed-customer">使用管理员为你分配的观因账号继续。</p>
       <label><span>用户名</span><input name="username" autocomplete="username" placeholder="请输入用户名" required></label>
       <label><span>密码</span><input name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required></label>
       <button type="submit" class="primary full">登录 <span aria-hidden="true">→</span></button><div id="login-error" class="error" role="alert"></div>

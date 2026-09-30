@@ -9,6 +9,18 @@ metadata:
   name: guanyin-instances
 ---
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: guanyin-enterprise-config
+  namespace: guanyin-system
+data:
+  # 使用 guanyin-license-issuer 生成的 Ed25519 公钥；私钥不得进入客户集群。
+  licensePublicKey: |
+    -----BEGIN PUBLIC KEY-----
+    部署前替换为实际公钥
+    -----END PUBLIC KEY-----
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: guanyin-control-plane
@@ -179,6 +191,11 @@ spec:
                 secretKeyRef:
                   name: guanyin-database
                   key: url
+            - name: GUANYIN_LICENSE_PUBLIC_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: guanyin-enterprise-config
+                  key: licensePublicKey
             - name: DSH_IMAGE
               value: bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64
             - name: DSH_VERSION
