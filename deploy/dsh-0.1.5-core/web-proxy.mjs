@@ -1,7 +1,7 @@
 import http from 'node:http'
 import net from 'node:net'
 import { readFile } from 'node:fs/promises'
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 
 const upstreamHost = '127.0.0.1'
 const upstreamPort = 3081
@@ -30,8 +30,17 @@ async function token() {
   try { return (await readFile('/tmp/dsh-web-token', 'utf8')).trim() } catch { return '' }
 }
 
-function hasDshSession(req) {
-  return /(?:^|;\s*)dsh-auth-[^=]+=/.test(String(req.headers.cookie || ''))
+function sessionFingerprint(webToken) {
+  return createHash('sha256').update(webToken).digest('base64url')
+}
+
+function hasCurrentDshSession(req, webToken) {
+  const expected = sessionFingerprint(webToken)
+  const actual = String(req.headers.cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith('guanyin-dsh-session='))?.slice('guanyin-dsh-session='.length)
+  if (!actual) return false
+  const left = Buffer.from(actual)
+  const right = Buffer.from(expected)
+  return left.length === right.length && timingSafeEqual(left, right)
 }
 
 function readJson(req, limit = 1024 * 1024) {
@@ -151,13 +160,18 @@ const server = http.createServer(async (req, res) => {
   if (internalMcp) return handleGuanyinMcp(req, res, internalMcp[1])
   const internalSessionRpc = path.match(/^\/__guanyin\/dsh-rpc\/(session\/[A-Za-z0-9_$.-]+|skills\/[A-Za-z0-9_$.-]+)$/)
   if (internalSessionRpc) return handleGuanyinSessionRpc(req, res, internalSessionRpc[1])
-  if (req.method === 'GET' && !hasDshSession(req)) {
-    const webToken = await token()
-    if (webToken) {
+  // All workspaces share the Guanyin browser origin.  A DSH cookie from a
+  // different workspace must not suppress this process's token exchange.  A
+  // non-secret fingerprint records which workspace most recently completed
+  // the exchange, avoiding both stale-cookie failures and redirect loops.
+  const acceptsHtml = String(req.headers.accept || '').includes('text/html')
+  const documentRequest = req.headers['sec-fetch-dest'] === 'document' || acceptsHtml
+  const webToken = documentRequest ? await token() : ''
+  const bootstrapping = req.method === 'GET' && documentRequest && webToken && !hasCurrentDshSession(req, webToken)
+  if (bootstrapping) {
       const url = new URL(path, 'http://dsh.local')
-      if (!url.searchParams.has('token')) url.searchParams.set('token', webToken)
+      url.searchParams.set('token', webToken)
       path = `${url.pathname}${url.search}`
-    }
   }
 
   const upstream = http.request({
@@ -167,7 +181,13 @@ const server = http.createServer(async (req, res) => {
     path,
     headers: req.headers,
   }, upstreamRes => {
-    res.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers)
+    const headers = { ...upstreamRes.headers }
+    if (bootstrapping) {
+      const cookies = Array.isArray(headers['set-cookie']) ? headers['set-cookie'] : headers['set-cookie'] ? [headers['set-cookie']] : []
+      cookies.push(`guanyin-dsh-session=${sessionFingerprint(webToken)}; Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict`)
+      headers['set-cookie'] = cookies
+    }
+    res.writeHead(upstreamRes.statusCode || 502, headers)
     upstreamRes.pipe(res)
   })
   upstream.on('error', error => {

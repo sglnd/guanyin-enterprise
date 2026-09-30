@@ -334,10 +334,14 @@ async function manageableSpace(user, instanceId) {
 async function provision(instance) {
   const name = `dsh-${instance.slug}`
   const labels = { 'app.kubernetes.io/name': 'dsh', 'guanyin.io/instance': instance.id }
-  // DSH protects `/` with authentication and correctly returns 401 before a
-  // session is established. Probe the listening socket instead of requiring
-  // an unauthenticated HTTP 2xx response.
-  const probeTcpSocket = { tcpSocket: { port: 3080 }, periodSeconds: 10, timeoutSeconds: 10, failureThreshold: 6 }
+  // Port 3080 belongs to the lightweight Guanyin proxy and opens before the
+  // DSH web process on loopback port 3081.  Marking the pod ready from 3080
+  // exposes a newly-created workspace too early and produces ECONNREFUSED
+  // until DSH finishes starting.  Probe the actual DSH listener instead.
+  const dshReadyCommand = [
+    'node', '-e',
+    "const net=require('net');const s=net.connect({host:'127.0.0.1',port:3081});const t=setTimeout(()=>{s.destroy();process.exit(1)},2000);s.once('connect',()=>{clearTimeout(t);s.destroy();process.exit(0)});s.once('error',()=>{clearTimeout(t);process.exit(1)})",
+  ]
   await createResource('Secret', { apiVersion: 'v1', kind: 'Secret', metadata: { name, labels }, stringData: { extensionToken: randomBytes(32).toString('hex') } })
   const mcpName = mcpResourceName(instance)
   await createResource('ConfigMap', { apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: mcpName, labels }, data: { 'config.json': JSON.stringify({ revision: 'initial', servers: [] }) } })
@@ -364,7 +368,7 @@ async function provision(instance) {
         // A startup probe gives first-run profile migration enough time without
         // confusing initialization with a permanently unhealthy pod.
         startupProbe: { tcpSocket: { port: 3080 }, periodSeconds: 10, timeoutSeconds: 10, failureThreshold: 60 },
-        readinessProbe: { ...probeTcpSocket },
+        readinessProbe: { exec: { command: dshReadyCommand }, periodSeconds: 5, timeoutSeconds: 3, failureThreshold: 12 },
         volumeMounts: [{ name: 'data', mountPath: '/data/dsh' }, { name: 'home', mountPath: '/home/node' }, { name: 'workspace', mountPath: '/workspace' },
           { name: 'guanyin-mcp-config', mountPath: '/etc/guanyin/mcp', readOnly: true }],
       }],

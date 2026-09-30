@@ -243,8 +243,10 @@ window.__ModuleLoader__.load({
         panel = document.createElement('a')
         panel.dataset.guanyinIdentity = 'true'
         panel.dataset.guanyinManaged = 'true'
-        panel.href = '/console'
+        panel.href = '/console?from=dsh'
+        panel.target = '_self'
         panel.title = '返回观因平台'
+        panel.addEventListener('click', returnToGuanyin, true)
         footer.append(panel)
       }
       const displayName = identity?.user?.displayName || identity?.user?.username || '已登录用户'
@@ -254,6 +256,12 @@ window.__ModuleLoader__.load({
       const detail = [departmentName, spaceName].filter(Boolean).join(' · ')
       const content = `<span class="dcu-guanyin-back"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 18l-6-6 6-6M9 12h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="dcu-guanyin-copy"><strong${identity?.impersonated ? ' class="dcu-guanyin-impersonated"' : ''}>${escapeHtml(displayName)}</strong><small title="${escapeHtml(detail)}">${escapeHtml(detail)}</small></span>`
       if (panel.innerHTML !== content) panel.innerHTML = content
+    }
+
+    function returnToGuanyin(event) {
+      event?.preventDefault?.()
+      event?.stopImmediatePropagation?.()
+      window.location.replace(new URL('/console?from=dsh', window.location.origin).href)
     }
 
     function escapeHtml(value) {
@@ -287,13 +295,11 @@ window.__ModuleLoader__.load({
       const start = () => {
         enforcePolicy()
         void loadIdentity()
-        const returnToGuanyin = (event) => {
+        const captureReturnToGuanyin = (event) => {
           if (!event.target.closest?.('[data-guanyin-identity]')) return
-          event.preventDefault()
-          event.stopImmediatePropagation()
-          window.location.assign(new URL('/console', window.location.origin).href)
+          returnToGuanyin(event)
         }
-        document.addEventListener('click', returnToGuanyin, true)
+        document.addEventListener('click', captureReturnToGuanyin, true)
         const pendingRoots = new Set()
         let timer
         const flush = () => {
@@ -312,7 +318,7 @@ window.__ModuleLoader__.load({
           if (pendingRoots.size && timer === undefined) timer = setTimeout(flush, 100)
         })
         observer.observe(document.documentElement, { childList: true, characterData: true, subtree: true })
-        return () => { observer.disconnect(); document.removeEventListener('click', returnToGuanyin, true); if (timer !== undefined) clearTimeout(timer) }
+        return () => { observer.disconnect(); document.removeEventListener('click', captureReturnToGuanyin, true); if (timer !== undefined) clearTimeout(timer) }
       }
 
       if (document.documentElement) {
