@@ -13,6 +13,17 @@
 
 更换或续期时，License 失效后登录页会自动重新显示授权更新表单。
 
+## 与社区版本地并行部署
+
+企业版本地清单使用独立资源，不复用社区版的数据库、PVC 或工作空间：
+
+| 版本 | 控制面命名空间 | 工作空间命名空间 | 本地端口 |
+| --- | --- | --- | --- |
+| 社区版 | `guanyin-system` | `guanyin-instances` | `18080` |
+| 企业版 | `guanyin-enterprise-system` | `guanyin-enterprise-instances` | `18081` |
+
+企业版访问地址为 `http://127.0.0.1:18081`。首次部署使用全新的 PostgreSQL 和 PVC，需要重新录入 License、创建用户及空间。
+
 ## 项目边界
 
 - 本仓库：观因控制平面、Web 控制台、PostgreSQL 数据模型和 Kubernetes 部署。

@@ -1,18 +1,18 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: guanyin-system
+  name: guanyin-enterprise-system
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: guanyin-instances
+  name: guanyin-enterprise-instances
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: guanyin-enterprise-config
-  namespace: guanyin-system
+  namespace: guanyin-enterprise-system
 data:
   # 使用 guanyin-license-issuer 生成的 Ed25519 公钥；私钥不得进入客户集群。
   licensePublicKey: |
@@ -24,13 +24,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: guanyin-control-plane
-  namespace: guanyin-system
+  namespace: guanyin-enterprise-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: guanyin-instance-manager
-  namespace: guanyin-instances
+  namespace: guanyin-enterprise-instances
 rules:
   - apiGroups: [""]
     resources: ["services", "secrets", "configmaps", "persistentvolumeclaims"]
@@ -46,11 +46,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: guanyin-instance-manager
-  namespace: guanyin-instances
+  namespace: guanyin-enterprise-instances
 subjects:
   - kind: ServiceAccount
     name: guanyin-control-plane
-    namespace: guanyin-system
+    namespace: guanyin-enterprise-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -60,7 +60,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: guanyin-database
-  namespace: guanyin-system
+  namespace: guanyin-enterprise-system
 type: Opaque
 stringData:
   username: guanyin
@@ -73,7 +73,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: guanyin-postgres
-  namespace: guanyin-system
+  namespace: guanyin-enterprise-system
 spec:
   clusterIP: None
   selector:
@@ -86,7 +86,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: guanyin-postgres
-  namespace: guanyin-system
+  namespace: guanyin-enterprise-system
 spec:
   serviceName: guanyin-postgres
   replicas: 1
@@ -147,7 +147,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: guanyin-control-plane
-  namespace: guanyin-system
+  namespace: guanyin-enterprise-system
 spec:
   replicas: 2
   strategy:
@@ -174,7 +174,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: control-plane
-          image: guanyin/control-plane:0.7.0
+          image: guanyin/control-plane:0.7.0-enterprise
           imagePullPolicy: Never
           ports:
             - containerPort: 8080
@@ -201,9 +201,9 @@ spec:
             - name: DSH_VERSION
               value: 0.1.5-rc.2
             - name: DSH_NAMESPACE
-              value: guanyin-instances
+              value: guanyin-enterprise-instances
             - name: DSH_TRUSTED_HOSTS
-              value: localhost:18080,127.0.0.1:18080
+              value: localhost:18081,127.0.0.1:18081
             - name: DSH_PERMISSION_MODE
               value: danger-full-access
             - name: DSH_DATA_PVC_SIZE
@@ -254,7 +254,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: guanyin-control-plane
-  namespace: guanyin-system
+  namespace: guanyin-enterprise-system
 spec:
   minAvailable: 1
   selector:
@@ -265,7 +265,7 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: guanyin-postgres-backups
-  namespace: guanyin-system
+  namespace: guanyin-enterprise-system
 spec:
   accessModes: ["ReadWriteOnce"]
   resources:
@@ -276,7 +276,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: guanyin-postgres-backup
-  namespace: guanyin-system
+  namespace: guanyin-enterprise-system
 spec:
   schedule: "15 2 * * *"
   concurrencyPolicy: Forbid
@@ -323,12 +323,12 @@ apiVersion: v1
 kind: Service
 metadata:
   name: guanyin-control-plane
-  namespace: guanyin-system
+  namespace: guanyin-enterprise-system
 spec:
   type: LoadBalancer
   selector:
     app: guanyin-control-plane
   ports:
     - name: http
-      port: 18080
+      port: 18081
       targetPort: 8080
