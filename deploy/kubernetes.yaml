@@ -196,6 +196,8 @@ spec:
                 configMapKeyRef:
                   name: guanyin-enterprise-config
                   key: licensePublicKey
+            - name: API_BUILDER_MCP_URL
+              value: http://guanyin-control-plane.guanyin-enterprise-system.svc.cluster.local:18081/internal/mcp/api-builder
             - name: DSH_IMAGE
               value: bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.1-arm64
             - name: DSH_VERSION

@@ -4,8 +4,8 @@
 
 运行时仅需要三张镜像：
 
-- `guanyin/control-plane:0.7.0-amd64`
-- `bankops/guanyin-dsh:0.1.5-rc.2-gy.1-amd64`
+- `guanyin/control-plane:0.7.0-enterprise-amd64`
+- `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.1-amd64`
 - `guanyin/postgres:17.6-alpine-amd64`
 
 `image-list.txt` 和 `platform.txt` 记录交付包的实际镜像名称、镜像 ID 与 CPU 架构。每个离线包只能部署到 `platform.txt` 所列架构的节点。先在生产集群执行：
@@ -56,13 +56,13 @@ sudo ctr -n k8s.io images ls | grep -E 'guanyin|postgres:17.6-alpine'
 不要把密码写入 YAML 或 Git。以下命令只在管理员终端执行；数据库密码和初始管理员密码应使用密码管理器生成并保存：
 
 ```bash
-kubectl create namespace guanyin-system --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace guanyin-enterprise-system --dry-run=client -o yaml | kubectl apply -f -
 
 read -s -p '初始管理员密码: ' ADMIN_PASSWORD; echo
 DB_PASSWORD="$(openssl rand -hex 32)"
 DB_URL="postgres://guanyin:${DB_PASSWORD}@guanyin-postgres:5432/guanyin"
 
-kubectl -n guanyin-system create secret generic guanyin-database \
+kubectl -n guanyin-enterprise-system create secret generic guanyin-database \
   --from-literal=username=guanyin \
   --from-literal=password="$DB_PASSWORD" \
   --from-literal=database=guanyin \
@@ -89,22 +89,22 @@ unset DB_PASSWORD ADMIN_PASSWORD DB_URL
 ```bash
 kubectl apply --dry-run=server -f kubernetes.yaml
 kubectl apply -f kubernetes.yaml
-kubectl -n guanyin-system rollout status statefulset/guanyin-postgres --timeout=5m
-kubectl -n guanyin-system rollout status deployment/guanyin-control-plane --timeout=5m
-kubectl get pods,pvc -n guanyin-system -o wide
+kubectl -n guanyin-enterprise-system rollout status statefulset/guanyin-postgres --timeout=5m
+kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-control-plane --timeout=5m
+kubectl get pods,pvc -n guanyin-enterprise-system -o wide
 ```
 
-生产清单默认将控制面暴露为 `ClusterIP:8080`。请通过现有 Ingress/Gateway 接入 HTTPS，并将后端指向 `guanyin-system/guanyin-control-plane:8080`。TLS 应在入口终止，且外部只能访问控制面，不能直接暴露 `guanyin-instances` 中的 DSH Service。
+生产清单默认将控制面暴露为 `ClusterIP:8080`。请通过现有 Ingress/Gateway 接入 HTTPS，并将后端指向 `guanyin-enterprise-system/guanyin-control-plane:8080`。TLS 应在入口终止，且外部只能访问控制面，不能直接暴露 `guanyin-enterprise-instances` 中的 DSH Service。
 
 ## 6. 验收
 
 ```bash
-kubectl -n guanyin-system get deployment guanyin-control-plane
-kubectl -n guanyin-system get statefulset guanyin-postgres
-kubectl -n guanyin-system get pdb guanyin-control-plane
+kubectl -n guanyin-enterprise-system get deployment guanyin-control-plane
+kubectl -n guanyin-enterprise-system get statefulset guanyin-postgres
+kubectl -n guanyin-enterprise-system get pdb guanyin-control-plane
 kubectl auth can-i create deployments.apps \
-  --as=system:serviceaccount:guanyin-system:guanyin-control-plane \
-  -n guanyin-instances
+  --as=system:serviceaccount:guanyin-enterprise-system:guanyin-control-plane \
+  -n guanyin-enterprise-instances
 ```
 
 浏览器通过正式 HTTPS 域名登录，立即修改/妥善保管管理员凭证，然后创建一个测试空间。验收以下项目：
@@ -123,15 +123,15 @@ kubectl auth can-i create deployments.apps \
 升级时先备份数据库，再在三个节点导入新镜像，修改清单镜像标签后滚动更新控制面。DSH 空间在创建时记录镜像版本，已有空间不会自动迁移。
 
 ```bash
-kubectl -n guanyin-system create job --from=cronjob/guanyin-postgres-backup guanyin-backup-before-upgrade
-kubectl -n guanyin-system rollout status deployment/guanyin-control-plane
+kubectl -n guanyin-enterprise-system create job --from=cronjob/guanyin-postgres-backup guanyin-backup-before-upgrade
+kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-control-plane
 ```
 
 控制面回滚：
 
 ```bash
-kubectl -n guanyin-system rollout history deployment/guanyin-control-plane
-kubectl -n guanyin-system rollout undo deployment/guanyin-control-plane
+kubectl -n guanyin-enterprise-system rollout history deployment/guanyin-control-plane
+kubectl -n guanyin-enterprise-system rollout undo deployment/guanyin-control-plane
 ```
 
 同集群备份 PVC 不能覆盖集群级故障，必须再同步到集群外对象存储。正式上线还应完成 TLS、NetworkPolicy、监控告警、容量测试和恢复演练，详见项目中的 `docs/production-readiness.md`。
