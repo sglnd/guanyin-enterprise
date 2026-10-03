@@ -197,9 +197,9 @@ spec:
                   name: guanyin-enterprise-config
                   key: licensePublicKey
             - name: DSH_IMAGE
-              value: bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64
+              value: bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.1-arm64
             - name: DSH_VERSION
-              value: 0.1.5-rc.2
+              value: 0.1.5-rc.2-gy.ent.1
             - name: DSH_NAMESPACE
               value: guanyin-enterprise-instances
             - name: DSH_TRUSTED_HOSTS

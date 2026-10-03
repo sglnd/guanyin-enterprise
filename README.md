@@ -24,6 +24,15 @@
 
 企业版访问地址为 `http://127.0.0.1:18081`。首次部署使用全新的 PostgreSQL 和 PVC，需要重新录入 License、创建用户及空间。
 
+## 企业版 DSH 镜像
+
+企业版使用独立的工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.1-arm64`。它从社区 DSH 镜像派生，不覆盖社区镜像，并针对私有化环境移除 DeepSeek 官方模型引导、官方 DeepSeek 提供方入口和 DeepSeek 网页搜索提供方。
+
+```bash
+docker build -f deploy/dsh-enterprise/Dockerfile \
+  -t bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.1-arm64 .
+```
+
 ## 项目边界
 
 - 本仓库：观因控制平面、Web 控制台、PostgreSQL 数据模型和 Kubernetes 部署。
