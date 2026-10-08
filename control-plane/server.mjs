@@ -7,15 +7,16 @@ import { extname, join } from 'node:path'
 import * as store from './store.mjs'
 import { ApiRunWorker, createDshAdapter, isTerminalApiRun, validateApiInput } from './api-runner.mjs'
 import { generateApiDocumentation, normalizeApiManifest } from './api-contract.mjs'
+import { managedMcpConfigMatches } from './mcp-sync.mjs'
 import { apiBuilderTools, executeApiBuilderTool, generateApiDraftWithAi } from './api-builder-mcp.mjs'
 import { createIdentityToken, withoutControlPlaneCookies, withoutInboundIdentityHeaders } from './guanyin-identity.mjs'
 import { inspectLicense, normalizeCustomerName, publicLicenseStatus } from './license.mjs'
 
 const PORT = Number(process.env.PORT || 8080)
 const PUBLIC_DIR = process.env.PUBLIC_DIR || '/app/public'
-const NAMESPACE = process.env.DSH_NAMESPACE || 'guanyin-instances'
-const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64'
-const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2'
+const NAMESPACE = process.env.DSH_NAMESPACE || 'guanyin-enterprise-instances'
+const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.2-arm64'
+const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2-gy.ent.2'
 const DSH_IMAGE_PULL_POLICY = process.env.DSH_IMAGE_PULL_POLICY || 'IfNotPresent'
 const DSH_STORAGE_CLASS = process.env.DSH_STORAGE_CLASS || ''
 const pvcSize = (name, fallback = '2Gi') => {
@@ -28,9 +29,9 @@ const DSH_PVC_SIZES = {
   home: pvcSize('DSH_HOME_PVC_SIZE'),
   workspace: pvcSize('DSH_WORKSPACE_PVC_SIZE'),
 }
-const PUBLIC_HOSTS = process.env.DSH_TRUSTED_HOSTS || 'localhost:18080,127.0.0.1:18080'
+const PUBLIC_HOSTS = process.env.DSH_TRUSTED_HOSTS || 'localhost:18081,127.0.0.1:18081'
 const DSH_PERMISSION_MODE = process.env.DSH_PERMISSION_MODE || 'danger-full-access'
-const API_BUILDER_MCP_URL = process.env.API_BUILDER_MCP_URL || 'http://guanyin-control-plane.guanyin-system.svc.cluster.local:18080/internal/mcp/api-builder'
+const API_BUILDER_MCP_URL = process.env.API_BUILDER_MCP_URL || 'http://guanyin-control-plane.guanyin-enterprise-system.svc.cluster.local:18081/internal/mcp/api-builder'
 const SESSION_TTL = 12 * 60 * 60 * 1000
 const IDLE_TIMEOUT_MINUTES = Number(process.env.IDLE_TIMEOUT_MINUTES || 60)
 const isDevelopment = process.env.NODE_ENV !== 'production'
@@ -245,15 +246,37 @@ async function instanceExtensionToken(instance) {
 }
 
 async function removeMcpEntries(instance, id) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
     const current = await callMcpManager(instance, 'list')
     if (!(current.servers || []).some(item => item.id === id)) return
-    await callMcpManager(instance, 'remove', { id })
+    if (attempt === 0) await callMcpManager(instance, 'remove', { id })
+    await delay(500)
   }
-  throw new Error(`MCP 配置 ${id} 存在重复项，自动清理失败`)
+  throw new Error(`MCP 配置 ${id} 删除后 DSH 重载未完成，请稍后重试`)
 }
 
-async function applySpaceMcp(instance) {
+const mcpSyncQueues = new Map()
+function applySpaceMcp(instance) {
+  const previous = mcpSyncQueues.get(instance.id) || Promise.resolve()
+  const next = previous.catch(() => {}).then(() => reconcileSpaceMcp(instance))
+  mcpSyncQueues.set(instance.id, next)
+  void next.finally(() => {
+    if (mcpSyncQueues.get(instance.id) === next) mcpSyncQueues.delete(instance.id)
+  }).catch(() => {})
+  return next
+}
+
+async function waitForMcpEntry(instance, entry) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const current = await callMcpManager(instance, 'list')
+    const matches = (current.servers || []).filter(item => item.id === entry.id)
+    if (matches.length === 1 && managedMcpConfigMatches(matches[0], entry.config)) return
+    await delay(500)
+  }
+  throw new Error(`MCP ${entry.config.serverName} 配置已保存，但 DSH 重载未完成，请稍后重试`)
+}
+
+async function reconcileSpaceMcp(instance) {
   const name = mcpResourceName(instance)
   const labels = { 'app.kubernetes.io/name': 'dsh', 'guanyin.io/instance': instance.id, 'guanyin.io/config': 'mcp' }
   const bindings = await store.listSpaceMcpBindings(instance.id, true)
@@ -279,10 +302,11 @@ async function applySpaceMcp(instance) {
   }
   for (const entry of desired.values()) {
     const existing = managed.filter(item => item.id === entry.id)
-    const unchanged = existing.length === 1 && JSON.stringify(existing[0].config || {}) === JSON.stringify(entry.config)
+    const unchanged = existing.length === 1 && managedMcpConfigMatches(existing[0], entry.config)
     if (unchanged) continue
     if (existing.length) await removeMcpEntries(instance, entry.id)
     await callMcpManager(instance, 'add', entry)
+    await waitForMcpEntry(instance, entry)
   }
   return revision
 }

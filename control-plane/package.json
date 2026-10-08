@@ -1,11 +1,11 @@
 {
   "name": "guanyin-control-plane",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs && node --check license.mjs && node --check dsh-adapter.mjs && node --check api-runner.mjs && node --check api-contract.mjs && node --check api-builder-mcp.mjs",
+    "check": "node --check server.mjs && node --check license.mjs && node --check dsh-adapter.mjs && node --check api-runner.mjs && node --check api-contract.mjs && node --check api-builder-mcp.mjs && node --check mcp-sync.mjs",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

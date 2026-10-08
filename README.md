@@ -26,11 +26,11 @@
 
 ## 企业版 DSH 镜像
 
-企业版使用独立的工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.1-arm64`。它从社区 DSH 镜像派生，不覆盖社区镜像，并针对私有化环境移除 DeepSeek 官方模型引导、官方 DeepSeek 提供方入口和 DeepSeek 网页搜索提供方。
+企业版使用独立的工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.2-arm64`。它从社区 DSH 镜像派生，不覆盖社区镜像，并针对私有化环境移除 DeepSeek 官方模型引导、官方 DeepSeek 提供方入口和 DeepSeek 网页搜索提供方。
 
 ```bash
 docker build -f deploy/dsh-enterprise/Dockerfile \
-  -t bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.1-arm64 .
+  -t bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.2-arm64 .
 ```
 
 ## 项目边界
