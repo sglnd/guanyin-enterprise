@@ -48,3 +48,7 @@ if (!patch.includes('id: web-search-deepseek')) {
 const result = await readFile(modelsClient, 'utf8')
 if (result.includes('id: "deepseek-official",\n\t\t\t\torder: 0')) throw new Error('DeepSeek onboarding is still registered')
 if (!result.includes('row.entry.provider !== "deepseek-official"')) throw new Error('DeepSeek provider filter was not installed')
+
+const enterpriseUiClient = await readFile(`${profileDir}/node_modules/@guanyin/dsh-ui-policy/lib/client.js`, 'utf8')
+if (!enterpriseUiClient.includes("<strong>观因</strong>")) throw new Error('Guanyin enterprise brand is missing from the UI policy')
+if (/文昌|Wenchang/i.test(enterpriseUiClient)) throw new Error('community Wenchang brand leaked into the enterprise UI policy')

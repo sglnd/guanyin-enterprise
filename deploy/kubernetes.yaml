@@ -177,7 +177,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: control-plane
-          image: guanyin/control-plane:0.7.2-enterprise
+          image: guanyin/control-plane:0.7.2-enterprise.1
           imagePullPolicy: Never
           ports:
             - containerPort: 8080
@@ -202,9 +202,9 @@ spec:
             - name: API_BUILDER_MCP_URL
               value: http://guanyin-control-plane.guanyin-enterprise-system.svc.cluster.local:18081/internal/mcp/api-builder
             - name: DSH_IMAGE
-              value: bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.3-arm64
+              value: bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-arm64
             - name: DSH_VERSION
-              value: 0.1.5-rc.2-gy.ent.3
+              value: 0.1.5-rc.2-gy.ent.4
             - name: DSH_NAMESPACE
               value: guanyin-enterprise-instances
             - name: DSH_TRUSTED_HOSTS
