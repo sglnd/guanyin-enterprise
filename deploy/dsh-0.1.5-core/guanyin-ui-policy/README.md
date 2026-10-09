@@ -26,3 +26,7 @@
 2. 检查 `build-policy.json` 中的宿主插件是否仍提供相同 RPC。
 3. 重新打包 `@guanyin/dsh-ui-policy`，构建 DSH 镜像。
 4. 验证被隐藏入口不存在，同时确认宿主能力仍可调用。
+
+## 文件入口
+
+隐藏原生右侧边栏的展开按钮（`button[data-sidebar-right-expand]`），文件列表统一从 better-sidebar 打开。不禁用原生 files、documentpreview 或 sidebar-right 模块，文件链接仍可触发原生预览，预览内的收起、全屏等控制保留。此调整随 DSH 镜像发布，已有空间需升级镜像。

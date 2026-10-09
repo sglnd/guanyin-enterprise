@@ -16,6 +16,8 @@ COPY control-plane/api-contract.mjs ./api-contract.mjs
 COPY control-plane/api-builder-mcp.mjs ./api-builder-mcp.mjs
 COPY control-plane/guanyin-identity.mjs ./guanyin-identity.mjs
 COPY control-plane/mcp-sync.mjs ./mcp-sync.mjs
+COPY control-plane/model-registry.mjs ./model-registry.mjs
+COPY control-plane/space-admin.mjs ./space-admin.mjs
 COPY control-plane/public ./public
 COPY assets/branding/guanyin-mark-graphite-cinnabar-v4.png ./public/guanyin-logo.png
 

@@ -24,7 +24,7 @@ function parseRpc(method, response) {
 }
 
 export class DshAdapter {
-  constructor({ instance, token, namespace = process.env.DSH_NAMESPACE || 'guanyin-instances', fetchImpl = fetch, WebSocketImpl = WebSocket }) {
+  constructor({ instance, token, namespace = process.env.DSH_NAMESPACE || 'guanyin-enterprise-instances', fetchImpl = fetch, WebSocketImpl = WebSocket }) {
     if (!instance?.slug || !token) throw new Error('DSH Adapter requires instance.slug and extension token')
     this.httpBase = `http://dsh-${instance.slug}.${namespace}.svc.cluster.local:3080`
     this.wsUrl = `ws://dsh-${instance.slug}.${namespace}.svc.cluster.local:3080/__guanyin/dsh-stream`

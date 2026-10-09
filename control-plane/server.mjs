@@ -7,6 +7,8 @@ import { extname, join } from 'node:path'
 import * as store from './store.mjs'
 import { ApiRunWorker, createDshAdapter, isTerminalApiRun, validateApiInput } from './api-runner.mjs'
 import { generateApiDocumentation, normalizeApiManifest } from './api-contract.mjs'
+import { removeSpaceResources } from './space-admin.mjs'
+import { modelProviderInput, managedProviderId, modelCredentialRef, testModelConnection } from './model-registry.mjs'
 import { managedMcpConfigMatches } from './mcp-sync.mjs'
 import { apiBuilderTools, executeApiBuilderTool, generateApiDraftWithAi } from './api-builder-mcp.mjs'
 import { createIdentityToken, withoutControlPlaneCookies, withoutInboundIdentityHeaders } from './guanyin-identity.mjs'
@@ -15,8 +17,8 @@ import { inspectLicense, normalizeCustomerName, publicLicenseStatus } from './li
 const PORT = Number(process.env.PORT || 8080)
 const PUBLIC_DIR = process.env.PUBLIC_DIR || '/app/public'
 const NAMESPACE = process.env.DSH_NAMESPACE || 'guanyin-enterprise-instances'
-const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.2-arm64'
-const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2-gy.ent.2'
+const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.3-arm64'
+const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2-gy.ent.3'
 const DSH_IMAGE_PULL_POLICY = process.env.DSH_IMAGE_PULL_POLICY || 'IfNotPresent'
 const DSH_STORAGE_CLASS = process.env.DSH_STORAGE_CLASS || ''
 const pvcSize = (name, fallback = '2Gi') => {
@@ -153,22 +155,26 @@ async function k8sRequest(method, path, payload) {
   const client = k8sClient()
   if (!client) throw new Error('Kubernetes API is unavailable')
   const [token, ca] = await Promise.all([readFile(client.tokenPath, 'utf8'), readFile(client.caPath)])
+  const body = payload ? JSON.stringify(payload) : undefined
   return new Promise((resolve, reject) => {
     const request = https.request({ hostname: client.host, port: client.port, path, method, ca, headers: {
       authorization: `Bearer ${token}`,
       accept: 'application/json',
-      ...(payload ? { 'content-type': method === 'PATCH' ? 'application/merge-patch+json' : 'application/json' } : {}),
+      ...(body ? { 'content-type': method === 'PATCH' ? 'application/merge-patch+json' : 'application/json', 'content-length': Buffer.byteLength(body) } : {}),
     } }, response => {
       let content = ''
       response.on('data', chunk => { content += chunk })
       response.on('end', () => {
-        const parsed = content ? JSON.parse(content) : {}
+        let parsed = {}
+        try { parsed = content ? JSON.parse(content) : {} }
+        catch { return reject(Object.assign(new Error(`Kubernetes API returned an invalid response (${response.statusCode})`), { statusCode: response.statusCode })) }
         if (response.statusCode >= 200 && response.statusCode < 300) resolve(parsed)
-        else reject(new Error(parsed.message || `Kubernetes API returned ${response.statusCode}`))
+        else reject(Object.assign(new Error(parsed.message || `Kubernetes API returned ${response.statusCode}`), { statusCode: response.statusCode }))
       })
     })
     request.on('error', reject)
-    if (payload) request.end(JSON.stringify(payload)); else request.end()
+    request.setTimeout(15_000, () => request.destroy(new Error('Kubernetes API request timed out')))
+    request.end(body)
   })
 }
 
@@ -255,6 +261,7 @@ async function removeMcpEntries(instance, id) {
   throw new Error(`MCP 配置 ${id} 删除后 DSH 重载未完成，请稍后重试`)
 }
 
+const deletingSpaces = new Set()
 const mcpSyncQueues = new Map()
 function applySpaceMcp(instance) {
   const previous = mcpSyncQueues.get(instance.id) || Promise.resolve()
@@ -264,6 +271,48 @@ function applySpaceMcp(instance) {
     if (mcpSyncQueues.get(instance.id) === next) mcpSyncQueues.delete(instance.id)
   }).catch(() => {})
   return next
+}
+
+const modelSyncQueues = new Map()
+function applySpaceModels(instance) {
+  const previous=modelSyncQueues.get(instance.id)||Promise.resolve()
+  const next=previous.catch(()=>{}).then(async()=>{
+    if(!await store.instanceById(instance.id))throw new Error('空间不存在或正在删除')
+    const config=await store.spaceModelConfig(instance.id)
+    if(!config.revision)return {status:'unmanaged'}
+    try {
+      const deployment=await k8sRequest('GET',`/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`)
+      if(!Number(deployment.spec.replicas||0)){await store.markModelSync(instance.id,config.revision,'pending');return {status:'pending'}}
+      const providers=[]
+      for(const id of config.providerIds){
+        const provider=await store.modelProviderById(id)
+        if(!provider?.enabled)continue
+        const secret=await k8sRequest('GET',`/api/v1/namespaces/${NAMESPACE}/secrets/guanyin-model-${provider.id}`)
+        const apiKey=Buffer.from(secret.data?.apiKey||'','base64').toString('utf8')
+        if(!apiKey)throw new Error('模型凭证未配置')
+        providers.push({id:managedProviderId(provider.code),credentialRef:modelCredentialRef(provider.id),apiKey,config:{...provider.config,displayName:provider.name}})
+      }
+      const defaultProvider=providers.find(p=>p.credentialRef===modelCredentialRef(config.defaultProviderId||''))
+      const token=await instanceExtensionToken(instance)
+      const response=await fetch(`http://dsh-${instance.slug}.${NAMESPACE}.svc.cluster.local:3080/__guanyin/models/sync`,{
+        method:'POST',headers:{'content-type':'application/json','x-guanyin-token':token},
+        body:JSON.stringify({providers,defaultModel:defaultProvider?{provider:defaultProvider.id,model:config.defaultModel}:null}),signal:AbortSignal.timeout(60000),
+      })
+      const result=await response.json().catch(()=>({}))
+      if(!response.ok || result.ok!==true || !Array.isArray(result.providers)
+        || JSON.stringify([...result.providers].sort())!==JSON.stringify(providers.map(p=>p.id).sort()))throw new Error('DSH 模型同步失败，请确认空间镜像支持模型管理接口并重试')
+      await store.markModelSync(instance.id,config.revision,'synced')
+      return {status:'synced'}
+    } catch(error){await store.markModelSync(instance.id,config.revision,'error');throw new Error('模型配置已保存，同步失败；请检查空间状态、凭证和 DSH 镜像后重试')}
+  })
+  modelSyncQueues.set(instance.id,next)
+  void next.finally(()=>{if(modelSyncQueues.get(instance.id)===next)modelSyncQueues.delete(instance.id)}).catch(()=>{})
+  return next
+}
+async function synchronizeProviderSpaces(id) {
+  const spaces=await store.modelProviderSpaces(id),result=[]
+  for(const space of spaces){try{result.push({id:space.id,...await applySpaceModels(space)})}catch{result.push({id:space.id,status:'error'})}}
+  return result
 }
 
 async function waitForMcpEntry(instance, entry) {
@@ -277,6 +326,7 @@ async function waitForMcpEntry(instance, entry) {
 }
 
 async function reconcileSpaceMcp(instance) {
+  if (!await store.instanceById(instance.id)) throw new Error('空间不存在或正在删除')
   const name = mcpResourceName(instance)
   const labels = { 'app.kubernetes.io/name': 'dsh', 'guanyin.io/instance': instance.id, 'guanyin.io/config': 'mcp' }
   const bindings = await store.listSpaceMcpBindings(instance.id, true)
@@ -317,7 +367,7 @@ async function syncSpaceMcpWhenReady(instance) {
   const replicas = Number(deployment.spec.replicas || 0)
   if (replicas === 0) return
   await waitForDeploymentReady(path, deployment.metadata?.generation, replicas)
-  await applySpaceMcp(instance)
+  await Promise.all([applySpaceMcp(instance), applySpaceModels(instance)])
 }
 
 async function apiBuilderMcp(req, res) {
@@ -411,6 +461,7 @@ async function provision(instance) {
 }
 
 async function refreshInstanceStatus(instance) {
+  if (instance.status === 'deleting') return
   try {
     const deployment = await k8sRequest('GET', `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`)
     instance.status = deployment.spec?.replicas === 0 ? 'stopped' : deployment.status?.readyReplicas > 0 ? 'running' : 'starting'
@@ -429,7 +480,7 @@ async function scaleInstance(instance, replicas) {
       try {
         const deployment = await k8sRequest('GET', path)
         await waitForDeploymentReady(path, deployment.metadata?.generation, replicas)
-        await applySpaceMcp(instance)
+        await Promise.all([applySpaceMcp(instance), applySpaceModels(instance)])
       } catch (error) {
         console.error(`failed to synchronize MCP for ${instance.id} after start:`, error)
       }
@@ -510,6 +561,7 @@ async function openApi(req, res, path) {
     const conversationKey = body.conversationKey == null ? null : String(body.conversationKey).slice(0, 128)
     const result = await store.createApiRun({ id: randomUUID(), apiReleaseId: invocation.apiReleaseId, credentialId: invocation.credentialId,
       instanceId: invocation.instanceId, requestId, conversationKey, input, maxQueueSize })
+    if (result.unavailable) return sendJson(res, 409, { error: { code: 'SPACE_UNAVAILABLE', message: '空间不存在或正在删除' } })
     if (result.queueFull) return sendJson(res, 429, { error: { code: 'QUEUE_FULL', message: '接口队列已满，请稍后重试' } }, { 'retry-after': '5' })
     if (!result.run) return sendJson(res, 409, { error: { code: 'REQUEST_ID_CONFLICT', message: 'requestId 已被其他凭证使用' } })
     if (result.created) await store.appendApiRunEvent(result.run.id, 'run.queued', { runId: result.run.id })
@@ -821,11 +873,79 @@ async function api(req, res, path) {
     return sendJson(res, 200, { bindings: await store.listSpaceMcpBindings(instance.id), revision })
   }
   if (user.role !== 'platform_admin') return sendJson(res, 403, { error: '需要平台管理员权限' })
-  if (path === '/api/admin/overview') { const data = await store.overview(); return sendJson(res, 200, { tenants: data.tenants, users: data.users.map(publicUser), versions: [{ id: DSH_VERSION, image: DSH_IMAGE, enabled: true }] }) }
+  if(path==='/api/admin/model-providers/test-connection' && req.method==='POST') {
+    const input=await bodyJson(req)
+    let value
+    try{value=modelProviderInput(input)}catch(error){return sendJson(res,400,{error:error.message})}
+    let apiKey=value.apiKey
+    if(!apiKey&&input.providerId){
+      const existing=await store.modelProviderById(input.providerId)
+      if(!existing)return sendJson(res,404,{error:'模型提供方不存在'})
+      try{const secret=await k8sRequest('GET',`/api/v1/namespaces/${NAMESPACE}/secrets/guanyin-model-${existing.id}`);apiKey=Buffer.from(secret.data?.apiKey||'','base64').toString('utf8')}catch{return sendJson(res,400,{error:'无法读取已保存密钥，请重新填写或检查 Secret 权限'})}
+    }
+    if(!apiKey)return sendJson(res,400,{error:'请填写 API Key'})
+    return sendJson(res,200,await testModelConnection(value,apiKey))
+  }
+  if (path === '/api/admin/model-providers' && req.method === 'GET') return sendJson(res,200,{providers:await store.listModelProviders()})
+  const modelProvider=path.match(/^\/api\/admin\/model-providers\/([^/]+)$/)
+  if ((path==='/api/admin/model-providers' && req.method==='POST') || (modelProvider && req.method==='PATCH')) {
+    const input=await bodyJson(req)
+    let value
+    try{value=modelProviderInput(input)}catch(error){return sendJson(res,400,{error:error.message})}
+    const existing=modelProvider?await store.modelProviderById(modelProvider[1]):null
+    if(modelProvider&&!existing)return sendJson(res,404,{error:'模型提供方不存在'})
+    if(existing&&existing.code!==value.code)return sendJson(res,400,{error:'提供方编码创建后不可修改'})
+    if(!existing&&!value.apiKey)return sendJson(res,400,{error:'新增提供方需填写 API Key'})
+    const id=existing?.id||randomUUID(),name=`guanyin-model-${id}`
+    try {
+      if(!existing)await store.saveModelProvider(id,value,user.id)
+      if(value.apiKey)await upsertResource('Secret',name,{apiVersion:'v1',kind:'Secret',metadata:{name,labels:{'guanyin.io/config':'model','guanyin.io/provider':id}},stringData:{apiKey:value.apiKey}})
+      if(existing)await store.saveModelProvider(id,value,user.id)
+      const sync=await synchronizeProviderSpaces(id)
+      await audit({actorUserId:user.id,action:existing?'model_provider_update':'model_provider_create',details:{providerId:id,code:value.code,keyChanged:Boolean(value.apiKey),ip:clientIp(req)}})
+      return sendJson(res,existing?200:201,{provider:await store.modelProviderById(id),sync})
+    }catch(error){
+      if(!existing){await store.deleteModelProvider(id,value.name).catch(()=>{});await k8sRequest('DELETE',`/api/v1/namespaces/${NAMESPACE}/secrets/${name}`).catch(()=>{})}
+      return sendJson(res,400,{error:error.code==='23505'?'提供方编码已存在':'模型登记失败，请检查数据库及 Secret 权限；密钥不会回显'})
+    }
+  }
+  if(modelProvider && req.method==='DELETE') {
+    const input=await bodyJson(req)
+    try{
+      await store.deleteModelProvider(modelProvider[1],input.confirmName)
+      try{await k8sRequest('DELETE',`/api/v1/namespaces/${NAMESPACE}/secrets/guanyin-model-${modelProvider[1]}`)}catch(error){if(error.statusCode!==404)throw error}
+      await audit({actorUserId:user.id,action:'model_provider_delete',details:{providerId:modelProvider[1],ip:clientIp(req)}})
+      return sendJson(res,200,{ok:true})
+    }catch(error){return sendJson(res,409,{error:error.message})}
+  }
+  const providerSpaces=path.match(/^\/api\/admin\/model-providers\/([^/]+)\/spaces$/)
+  if(providerSpaces&&req.method==='GET')return sendJson(res,200,{spaces:await store.modelProviderSpaces(providerSpaces[1])})
+  const spaceModels=path.match(/^\/api\/admin\/instances\/([^/]+)\/models(?:\/(sync))?$/)
+  if(spaceModels){
+    const instance=await store.instanceById(spaceModels[1])
+    if(!instance)return sendJson(res,404,{error:'空间不存在或正在删除'})
+    if(req.method==='GET'&&!spaceModels[2])return sendJson(res,200,{config:await store.spaceModelConfig(instance.id),providers:await store.listModelProviders()})
+    if(req.method==='PUT'&&!spaceModels[2]){
+      try{await store.saveSpaceModelConfig(instance.id,await bodyJson(req))}catch(error){return sendJson(res,409,{error:error.message})}
+      await audit({actorUserId:user.id,action:'space_models_update',targetInstanceId:instance.id,details:{ip:clientIp(req)}})
+    }else if(!(req.method==='POST'&&spaceModels[2]))return sendJson(res,405,{error:'方法不支持'})
+    try{const sync=await applySpaceModels(instance);return sendJson(res,200,{config:await store.spaceModelConfig(instance.id),sync})}
+    catch{return sendJson(res,200,{config:await store.spaceModelConfig(instance.id),sync:{status:'error'}})}
+  }
+  if (path === '/api/admin/overview') { const data = await store.overview(new URL(req.url, 'http://localhost').searchParams.get('metadataOnly') === 'true'); return sendJson(res, 200, { ...data, users: data.users.map(publicUser), versions: [{ id: DSH_VERSION, image: DSH_IMAGE, enabled: true }] }) }
+  if (path === '/api/admin/users' && req.method === 'GET') {
+    try {
+      const result = await store.listAdminUsers(new URL(req.url, 'http://localhost').searchParams)
+      return sendJson(res, 200, { ...result, users: result.users.map(publicUser) })
+    } catch (error) { return sendJson(res, 400, { error: error.message }) }
+  }
   if (path === '/api/admin/instances' && req.method === 'GET') {
-    const instances = await store.listAllInstances()
-    await Promise.all(instances.map(refreshInstanceStatus))
-    return sendJson(res, 200, { instances })
+    try {
+      const params = new URL(req.url, 'http://localhost').searchParams
+      const result = await store.listAdminInstances(params)
+      await Promise.all(result.instances.map(refreshInstanceStatus))
+      return sendJson(res, 200, await store.listAdminInstances(params))
+    } catch (error) { return sendJson(res, 400, { error: error.message }) }
   }
   const instanceMembers = path.match(/^\/api\/admin\/instances\/([^/]+)\/members$/)
   if (instanceMembers && req.method === 'GET') {
@@ -853,6 +973,26 @@ async function api(req, res, path) {
     return sendJson(res, 200, { members: await store.listInstanceMembers(instance.id) })
   }
   const updateSpace = path.match(/^\/api\/admin\/instances\/([^/]+)$/)
+  if (updateSpace && req.method === 'DELETE') {
+    const instance = await store.instanceById(updateSpace[1], true)
+    if (!instance) return sendJson(res, 404, { error: '空间不存在或已删除' })
+    const input = await bodyJson(req)
+    if (input.confirmName !== instance.name || input.deleteData !== false) return sendJson(res, 400, { error: '请输入完整空间名称并确认保留 PVC 数据' })
+    if (deletingSpaces.has(instance.id)) return sendJson(res, 409, { error: '空间删除正在进行，请稍候' })
+    deletingSpaces.add(instance.id)
+    try {
+      await store.beginSpaceDeletion(instance.id)
+      await audit({ actorUserId: user.id, action: 'space_delete_requested', targetInstanceId: instance.id, details: { name: instance.name, deleteData: false, ip: clientIp(req) } })
+      await mcpSyncQueues.get(instance.id)?.catch(() => {})
+      await modelSyncQueues.get(instance.id)?.catch(() => {})
+      await removeSpaceResources(instance, { namespace: NAMESPACE, request: k8sRequest })
+      await store.finishSpaceDeletion(instance.id)
+      await audit({ actorUserId: user.id, action: 'space_delete', targetInstanceId: instance.id, details: { name: instance.name, deleteData: false, ip: clientIp(req) } })
+      return sendJson(res, 200, { ok: true })
+    } catch (error) {
+      return sendJson(res, 409, { error: error.message })
+    } finally { deletingSpaces.delete(instance.id) }
+  }
   if (updateSpace && req.method === 'PATCH') {
     const instance = await store.instanceById(updateSpace[1]); const input = await bodyJson(req)
     const name = String(input.name || '').trim(); const timeout = idleTimeout(input.idleTimeoutMinutes)
@@ -900,6 +1040,36 @@ async function api(req, res, path) {
     } catch (error) { if (error.code === '23505') return sendJson(res, 400, { error: '用户名已存在' }); throw error }
   }
   const updateUser = path.match(/^\/api\/admin\/users\/([^/]+)$/)
+  if (updateUser && req.method === 'DELETE') {
+    const input = await bodyJson(req)
+    try {
+      const target = await store.deleteUser(updateUser[1], input.confirmName)
+      await audit({ actorUserId: user.id, action: 'user_delete', targetUserId: target.id, details: { username: target.username, ip: clientIp(req) } })
+      return sendJson(res, 200, { ok: true })
+    } catch (error) { return sendJson(res, 409, { error: error.message }) }
+  }
+  const editTenant = path.match(/^\/api\/admin\/tenants\/([^/]+)$/)
+  if (editTenant && req.method === 'PATCH') {
+    const target = await store.tenantById(editTenant[1]), input = await bodyJson(req)
+    if (!target) return sendJson(res, 404, { error: '租户不存在' })
+    const name = String(input.name || '').trim(), code = safeName(input.code)
+    if (!name || !code) return sendJson(res, 400, { error: '租户名称或编码无效' })
+    if (target.code === 'default' && code !== 'default') return sendJson(res, 400, { error: '默认租户编码不能修改' })
+    try {
+      const tenant = await store.updateTenant(target.id, { name, code })
+      if (!tenant) return sendJson(res, 404, { error: '租户已删除' })
+      await audit({ actorUserId: user.id, action: 'tenant_update', details: { tenantId: target.id, before: target, after: tenant, ip: clientIp(req) } })
+      return sendJson(res, 200, { tenant })
+    } catch (error) { if (error.code === '23505') return sendJson(res, 400, { error: '租户编码已存在（包括历史已删除租户）' }); throw error }
+  }
+  if (editTenant && req.method === 'DELETE') {
+    const input = await bodyJson(req)
+    try {
+      const tenant = await store.deleteTenant(editTenant[1], input.confirmName)
+      await audit({ actorUserId: user.id, action: 'tenant_delete', details: { tenantId: tenant.id, name: tenant.name, code: tenant.code, ip: clientIp(req) } })
+      return sendJson(res, 200, { ok: true })
+    } catch (error) { return sendJson(res, 409, { error: error.message }) }
+  }
   if (updateUser && req.method === 'PATCH') {
     const target = await store.userById(updateUser[1]); const input = await bodyJson(req)
     if (!target) return sendJson(res, 404, { error: '用户不存在' })
@@ -986,6 +1156,7 @@ async function proxyHttp(req, res, instance, user) {
 const server = http.createServer(async (req, res) => {
   try {
     const path = new URL(req.url, 'http://localhost').pathname
+    if (path.startsWith('/__guanyin/models')) return sendJson(res,404,{error:'Not found'})
     if (path === '/healthz') return sendJson(res, 200, { ok: true })
     if (path === '/readyz') { await store.health(); return sendJson(res, 200, { ok: true }) }
     if (path === '/api/license/status' || path === '/api/license/activate') return await api(req, res, path)
@@ -1050,7 +1221,7 @@ server.listen(PORT, '0.0.0.0', () => console.log(`Guanyin control plane listenin
 setTimeout(async () => {
   for (const instance of await store.listAllInstances()) {
     if (instance.version !== DSH_VERSION) continue
-    try { await applySpaceMcp(instance) } catch (error) { console.error(`failed to reconcile MCP for ${instance.id}:`, error) }
+    try { await Promise.all([applySpaceMcp(instance), applySpaceModels(instance)]) } catch (error) { console.error(`failed to reconcile MCP for ${instance.id}:`, error) }
   }
 }, 3_000 + Math.floor(Math.random() * 2_000)).unref()
 

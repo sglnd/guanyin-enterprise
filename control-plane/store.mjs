@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import pg from 'pg'
+import { spaceListOptions, userListOptions } from './space-admin.mjs'
 
 const { Pool } = pg
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: Number(process.env.DB_POOL_SIZE || 10) })
@@ -33,7 +34,13 @@ export function apiKeyHash(token) {
 
 export async function initialize({ adminUsername, adminPasswordHash }) {
   if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required')
-  await pool.query(`
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    // Multiple control-plane replicas can boot together. Serialize schema
+    // initialization so PostgreSQL does not race while creating table types.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('guanyin-control-plane-schema'))")
+    await client.query(`
     CREATE TABLE IF NOT EXISTS tenants (
       id uuid PRIMARY KEY, name text NOT NULL, code text NOT NULL UNIQUE,
       created_at timestamptz NOT NULL DEFAULT now()
@@ -44,6 +51,8 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
       tenant_id uuid NOT NULL REFERENCES tenants(id), password_hash text NOT NULL,
       enabled boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now()
     );
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS mcp_admin boolean NOT NULL DEFAULT false;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS api_admin boolean NOT NULL DEFAULT false;
     CREATE TABLE IF NOT EXISTS instances (
@@ -53,6 +62,9 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
       last_active_at timestamptz, created_at timestamptz NOT NULL DEFAULT now()
     );
     ALTER TABLE instances ALTER COLUMN user_id DROP NOT NULL;
+    ALTER TABLE instances ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+    CREATE INDEX IF NOT EXISTS instances_live_created_idx ON instances(created_at DESC,id DESC) WHERE deleted_at IS NULL;
+    CREATE INDEX IF NOT EXISTS users_created_idx ON users(created_at DESC,id DESC);
     ALTER TABLE instances ADD COLUMN IF NOT EXISTS idle_timeout_minutes integer;
     ALTER TABLE instances ADD COLUMN IF NOT EXISTS api_max_concurrency integer NOT NULL DEFAULT 4;
     CREATE TABLE IF NOT EXISTS instance_members (
@@ -149,6 +161,16 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
       conversation_key text NOT NULL, dsh_session_id text NOT NULL, updated_at timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY(credential_id,api_release_id,conversation_key)
     );
+    CREATE TABLE IF NOT EXISTS model_providers (
+      id uuid PRIMARY KEY, code text NOT NULL UNIQUE, name text NOT NULL, config jsonb NOT NULL,
+      enabled boolean NOT NULL DEFAULT true, created_by uuid NOT NULL REFERENCES users(id),
+      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS space_model_configs (
+      instance_id uuid PRIMARY KEY REFERENCES instances(id), provider_ids uuid[] NOT NULL DEFAULT '{}',
+      default_provider_id uuid REFERENCES model_providers(id), default_model text,
+      revision integer NOT NULL DEFAULT 1, sync_status text NOT NULL DEFAULT 'pending', synced_at timestamptz
+    );
     CREATE INDEX IF NOT EXISTS instances_user_idx ON instances(user_id);
     CREATE INDEX IF NOT EXISTS instance_members_user_idx ON instance_members(user_id,instance_id);
     CREATE UNIQUE INDEX IF NOT EXISTS instance_members_one_owner_idx ON instance_members(instance_id) WHERE access_role='owner';
@@ -160,11 +182,8 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
     CREATE INDEX IF NOT EXISTS api_runs_status_queued_idx ON api_runs(status,queued_at);
     CREATE INDEX IF NOT EXISTS api_runs_credential_status_idx ON api_runs(credential_id,status);
     CREATE INDEX IF NOT EXISTS api_runs_instance_status_idx ON api_runs(instance_id,status);
-  `)
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-    const tenant = await client.query(`INSERT INTO tenants(id,name,code) VALUES(gen_random_uuid(),'默认租户','default') ON CONFLICT(code) DO UPDATE SET name=EXCLUDED.name RETURNING id`)
+    `)
+    const tenant = await client.query(`INSERT INTO tenants(id,name,code) VALUES(gen_random_uuid(),'默认租户','default') ON CONFLICT(code) DO UPDATE SET code=tenants.code RETURNING id`)
     await client.query(`INSERT INTO users(id,username,display_name,role,tenant_id,password_hash,enabled)
       VALUES(gen_random_uuid(),$1,'平台管理员','platform_admin',$2,$3,true)
       ON CONFLICT(username) DO NOTHING`, [adminUsername, tenant.rows[0].id, adminPasswordHash])
@@ -174,13 +193,13 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
 }
 
 export async function userByUsername(username) {
-  const result = await pool.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.username=$1`, [username])
+  const result = await pool.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.username=$1 AND u.deleted_at IS NULL`, [username])
   return result.rows[0]
 }
 
 export async function userBySession(token) {
   if (!token) return undefined
-  const result = await pool.query(`SELECT ${userColumns} FROM sessions s JOIN users u ON u.id=s.user_id JOIN tenants t ON t.id=u.tenant_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.enabled=true`, [sessionHash(token)])
+  const result = await pool.query(`SELECT ${userColumns} FROM sessions s JOIN users u ON u.id=s.user_id JOIN tenants t ON t.id=u.tenant_id WHERE s.token_hash=$1 AND s.expires_at>now() AND u.enabled=true AND u.deleted_at IS NULL`, [sessionHash(token)])
   return result.rows[0]
 }
 
@@ -195,24 +214,24 @@ export async function deleteSession(token) {
 export async function listInstances(user) {
   const result = await pool.query(`SELECT ${instanceColumns}, access.access_role AS "accessRole"
     FROM instances i ${instanceJoins} JOIN instance_members access ON access.instance_id=i.id
-    WHERE access.user_id=$1 ORDER BY i.created_at DESC`, [user.id])
+    WHERE access.user_id=$1 AND i.deleted_at IS NULL AND i.status<>'deleting' ORDER BY i.created_at DESC`, [user.id])
   return result.rows
 }
 
 export async function listAllInstances() {
-  const result = await pool.query(`SELECT ${instanceColumns} FROM instances i ${instanceJoins} ORDER BY i.created_at DESC`)
+  const result = await pool.query(`SELECT ${instanceColumns} FROM instances i ${instanceJoins} WHERE i.deleted_at IS NULL ORDER BY i.created_at DESC`)
   return result.rows
 }
 
 export async function instanceOwnedByUser(id, userId) {
   const result = await pool.query(`SELECT ${instanceColumns}, access.access_role AS "accessRole"
     FROM instances i ${instanceJoins} JOIN instance_members access ON access.instance_id=i.id
-    WHERE i.id=$1 AND access.user_id=$2`, [id, userId])
+    WHERE i.id=$1 AND access.user_id=$2 AND i.deleted_at IS NULL AND i.status<>'deleting'`, [id, userId])
   return result.rows[0]
 }
 
-export async function instanceById(id) {
-  const result = await pool.query(`SELECT ${instanceColumns} FROM instances i ${instanceJoins} WHERE i.id=$1`, [id])
+export async function instanceById(id, includeDeleting = false) {
+  const result = await pool.query(`SELECT ${instanceColumns} FROM instances i ${instanceJoins} WHERE i.id=$1 AND i.deleted_at IS NULL ${includeDeleting ? '' : "AND i.status<>'deleting'"}`, [id])
   return result.rows[0]
 }
 
@@ -258,7 +277,7 @@ export async function updateInstance(id, values) {
   const fields = []; const params = []
   for (const [key, value] of Object.entries(values)) { params.push(value); fields.push(`${key}=$${params.length}`) }
   params.push(id)
-  await pool.query(`UPDATE instances SET ${fields.join(',')} WHERE id=$${params.length}`, params)
+  await pool.query(`UPDATE instances SET ${fields.join(',')} WHERE id=$${params.length} AND deleted_at IS NULL AND status<>'deleting'`, params)
 }
 
 export async function touchInstance(id) {
@@ -268,19 +287,20 @@ export async function touchInstance(id) {
 
 export async function claimIdleInstances() {
   const result = await pool.query(`UPDATE instances SET status='stopping'
-    WHERE id IN (SELECT id FROM instances WHERE status='running' AND last_active_at IS NOT NULL
+    WHERE id IN (SELECT id FROM instances WHERE deleted_at IS NULL AND status='running' AND last_active_at IS NOT NULL
       AND idle_timeout_minutes IS NOT NULL
       AND last_active_at < now() - (idle_timeout_minutes::text || ' minutes')::interval FOR UPDATE SKIP LOCKED)
     RETURNING id,name,slug,version,image,tenant_id AS "tenantId",user_id AS "userId",status`)
   return result.rows
 }
 
-export async function overview() {
+export async function overview(metadataOnly = false) {
   const [tenants, users] = await Promise.all([
-    pool.query('SELECT id,name,code,created_at AS "createdAt" FROM tenants ORDER BY created_at'),
-    pool.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id ORDER BY u.created_at`),
+    pool.query('SELECT t.id,t.name,t.code,t.created_at AS "createdAt",(SELECT count(*)::int FROM users u WHERE u.tenant_id=t.id AND u.deleted_at IS NULL) AS "memberCount",(SELECT count(*)::int FROM instances i WHERE i.tenant_id=t.id AND i.deleted_at IS NULL) AS "spaceCount" FROM tenants t WHERE t.deleted_at IS NULL ORDER BY t.created_at'),
+    metadataOnly ? Promise.resolve({ rows: [] }) : pool.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.deleted_at IS NULL ORDER BY u.created_at`),
   ])
-  return { tenants: tenants.rows, users: users.rows }
+  const summary = (await pool.query("SELECT count(*)::int AS total,count(*) FILTER (WHERE enabled)::int AS enabled,count(*) FILTER (WHERE role<>'member')::int AS admins FROM users WHERE deleted_at IS NULL")).rows[0]
+  return { tenants: tenants.rows, users: users.rows, summary }
 }
 
 export async function createTenant({ id, name, code, createdAt }) {
@@ -289,28 +309,44 @@ export async function createTenant({ id, name, code, createdAt }) {
 }
 
 export async function tenantExists(id) {
-  return (await pool.query('SELECT 1 FROM tenants WHERE id=$1', [id])).rowCount > 0
+  return (await pool.query('SELECT 1 FROM tenants WHERE id=$1 AND deleted_at IS NULL', [id])).rowCount > 0
+}
+
+async function inLiveTenant(tenantId, operation) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    if (!(await client.query('SELECT id FROM tenants WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [tenantId])).rowCount) throw new Error('租户不存在或已删除')
+    const result = await operation(client)
+    await client.query('COMMIT')
+    return result
+  } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
 }
 
 export async function createUser(user) {
-  const result = await pool.query(`INSERT INTO users(id,username,display_name,role,tenant_id,password_hash,enabled,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, [user.id,user.username,user.displayName,user.role,user.tenantId,user.passwordHash,user.enabled,user.createdAt])
-  return (await pool.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1`, [result.rows[0].id])).rows[0]
+  return inLiveTenant(user.tenantId, async client => {
+    await client.query(`INSERT INTO users(id,username,display_name,role,tenant_id,password_hash,enabled,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [user.id,user.username,user.displayName,user.role,user.tenantId,user.passwordHash,user.enabled,user.createdAt])
+    return (await client.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1`, [user.id])).rows[0]
+  })
 }
 
 export async function userById(id) {
-  return (await pool.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1`, [id])).rows[0]
+  return (await pool.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1 AND u.deleted_at IS NULL`, [id])).rows[0]
 }
 
 export async function updateUser(id, { displayName, role, tenantId, enabled, mcpAdmin = false, apiAdmin = false }) {
-  await pool.query(`UPDATE users SET display_name=$2,role=$3,tenant_id=$4,enabled=$5,mcp_admin=$6,api_admin=$7 WHERE id=$1`, [id, displayName, role, tenantId, enabled, mcpAdmin, apiAdmin])
-  return userById(id)
+  return inLiveTenant(tenantId, async client => {
+    const result = await client.query(`UPDATE users SET display_name=$2,role=$3,tenant_id=$4,enabled=$5,mcp_admin=$6,api_admin=$7 WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [id, displayName, role, tenantId, enabled, mcpAdmin, apiAdmin])
+    if (!result.rowCount) throw new Error('用户不存在或已删除')
+    return (await client.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1`, [id])).rows[0]
+  })
 }
 
 export async function resetUserPassword(id, passwordHash) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    const result = await client.query('UPDATE users SET password_hash=$2 WHERE id=$1 RETURNING id', [id, passwordHash])
+    const result = await client.query('UPDATE users SET password_hash=$2 WHERE id=$1 AND deleted_at IS NULL RETURNING id', [id, passwordHash])
     if (!result.rowCount) { await client.query('ROLLBACK'); return false }
     await client.query('DELETE FROM sessions WHERE user_id=$1', [id])
     await client.query('COMMIT')
@@ -319,8 +355,10 @@ export async function resetUserPassword(id, passwordHash) {
 }
 
 export async function createInstance(instance) {
-  await pool.query(`INSERT INTO instances(id,name,slug,version,image,tenant_id,user_id,status,idle_timeout_minutes,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [instance.id,instance.name,instance.slug,instance.version,instance.image,instance.tenantId,null,instance.status,instance.idleTimeoutMinutes,instance.createdAt])
-  return instance
+  return inLiveTenant(instance.tenantId, async client => {
+    await client.query(`INSERT INTO instances(id,name,slug,version,image,tenant_id,user_id,status,idle_timeout_minutes,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [instance.id,instance.name,instance.slug,instance.version,instance.image,instance.tenantId,null,instance.status,instance.idleTimeoutMinutes,instance.createdAt])
+    return instance
+  })
 }
 
 export async function updateInstanceSettings(id, { name, idleTimeoutMinutes }) {
@@ -332,13 +370,14 @@ export async function listInstanceMembers(instanceId) {
   return (await pool.query(`SELECT u.id,u.username,u.display_name AS "displayName",u.tenant_id AS "tenantId",
     t.name AS "tenantName",im.access_role AS "accessRole",im.created_at AS "createdAt"
     FROM instance_members im JOIN users u ON u.id=im.user_id JOIN tenants t ON t.id=u.tenant_id
-    WHERE im.instance_id=$1 ORDER BY CASE im.access_role WHEN 'owner' THEN 0 WHEN 'operator' THEN 1 ELSE 2 END,u.display_name`, [instanceId])).rows
+    WHERE im.instance_id=$1 AND u.deleted_at IS NULL ORDER BY CASE im.access_role WHEN 'owner' THEN 0 WHEN 'operator' THEN 1 ELSE 2 END,u.display_name`, [instanceId])).rows
 }
 
 export async function setInstanceMember(instanceId, userId, accessRole) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    if (!(await client.query('SELECT id FROM users WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [userId])).rowCount) throw new Error('用户不存在或已删除')
     if (accessRole === 'owner') await client.query("UPDATE instance_members SET access_role='operator' WHERE instance_id=$1 AND access_role='owner' AND user_id<>$2", [instanceId, userId])
     await client.query(`INSERT INTO instance_members(instance_id,user_id,access_role) VALUES($1,$2,$3)
       ON CONFLICT(instance_id,user_id) DO UPDATE SET access_role=EXCLUDED.access_role`, [instanceId, userId, accessRole])
@@ -355,7 +394,7 @@ export async function listMcpServers() {
   return (await pool.query(`SELECT m.id,m.name,m.server_name AS "serverName",m.description,m.transport,m.url,
     m.enabled,m.created_at AS "createdAt",m.updated_at AS "updatedAt",count(b.instance_id)::int AS "spaceCount",
     (m.headers <> '{}'::jsonb) AS "hasHeaders"
-    FROM mcp_servers m LEFT JOIN space_mcp_bindings b ON b.mcp_server_id=m.id
+    FROM mcp_servers m LEFT JOIN space_mcp_bindings b ON b.mcp_server_id=m.id AND EXISTS (SELECT 1 FROM instances i WHERE i.id=b.instance_id AND i.deleted_at IS NULL AND i.status<>'deleting')
     GROUP BY m.id ORDER BY m.updated_at DESC`)).rows
 }
 
@@ -383,7 +422,7 @@ export async function deleteMcpServer(id) {
 export async function listMcpSpaces(mcpServerId) {
   return (await pool.query(`SELECT i.id,i.name,i.slug,i.version,i.status,t.name AS tenant,b.created_at AS "connectedAt"
     FROM space_mcp_bindings b JOIN instances i ON i.id=b.instance_id JOIN tenants t ON t.id=i.tenant_id
-    WHERE b.mcp_server_id=$1 ORDER BY b.created_at DESC`, [mcpServerId])).rows
+    WHERE i.deleted_at IS NULL AND i.status<>'deleting' AND b.mcp_server_id=$1 ORDER BY b.created_at DESC`, [mcpServerId])).rows
 }
 
 export async function listSpaceMcpBindings(instanceId, includeHeaders = false) {
@@ -420,7 +459,7 @@ export async function resolveApiInvocation(slug, secret) {
     JOIN api_releases r ON r.id=g.api_release_id AND r.retired_at IS NULL
     JOIN api_definitions d ON d.id=r.api_definition_id
     JOIN instances i ON i.id=d.instance_id AND i.id=c.instance_id
-    WHERE c.secret_hash=$1 AND c.enabled=true AND (c.expires_at IS NULL OR c.expires_at>now()) AND d.slug=$2
+    WHERE i.deleted_at IS NULL AND i.status<>'deleting' AND c.secret_hash=$1 AND c.enabled=true AND (c.expires_at IS NULL OR c.expires_at>now()) AND d.slug=$2
     ORDER BY r.version DESC LIMIT 1`, [apiKeyHash(secret), slug])
   if (result.rowCount) await pool.query('UPDATE api_credentials SET last_used_at=now() WHERE id=$1', [result.rows[0].credentialId])
   return result.rows[0]
@@ -435,6 +474,8 @@ export async function createApiRun(value) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    const available = await client.query("SELECT id FROM instances WHERE id=$1 AND deleted_at IS NULL AND status<>'deleting' FOR UPDATE", [value.instanceId])
+    if (!available.rowCount) { await client.query('COMMIT'); return { unavailable: true } }
     const existing = await client.query(`SELECT ${apiRunColumns} FROM api_runs r WHERE r.request_id=$1`, [value.requestId])
     if (existing.rowCount) {
       await client.query('COMMIT')
@@ -549,14 +590,14 @@ export async function listApiDefinitions(user, globalAccess = false) {
     FROM api_definitions d JOIN instances i ON i.id=d.instance_id JOIN users u ON u.id=d.owner_user_id ${access}
     LEFT JOIN LATERAL (SELECT id,version,retired_at FROM api_releases WHERE api_definition_id=d.id ORDER BY version DESC LIMIT 1) latest ON true
     LEFT JOIN LATERAL (SELECT count(*) run_count,count(*) FILTER (WHERE status='failed') failed_count FROM api_runs WHERE api_release_id=latest.id) stats ON true
-    ORDER BY d.updated_at DESC`, params)).rows
+    WHERE i.deleted_at IS NULL AND i.status<>'deleting' ORDER BY d.updated_at DESC`, params)).rows
 }
 
 export async function apiDefinitionById(id) {
   return (await pool.query(`SELECT d.id,d.slug,d.name,d.description,d.status,d.draft_manifest AS "draftManifest",
     d.instance_id AS "instanceId",i.name AS "instanceName",i.tenant_id AS "tenantId",
     d.owner_user_id AS "ownerUserId",u.display_name AS "ownerName",d.created_at AS "createdAt",d.updated_at AS "updatedAt"
-    FROM api_definitions d JOIN instances i ON i.id=d.instance_id JOIN users u ON u.id=d.owner_user_id WHERE d.id=$1`, [id])).rows[0]
+    FROM api_definitions d JOIN instances i ON i.id=d.instance_id JOIN users u ON u.id=d.owner_user_id WHERE d.id=$1 AND i.deleted_at IS NULL AND i.status<>'deleting'`, [id])).rows[0]
 }
 
 export async function listApiDefinitionsByInstance(instanceId) {
@@ -665,3 +706,182 @@ export async function saveEnterpriseLicense(customerName, token) {
 }
 
 export async function close() { await pool.end() }
+
+
+export async function listAdminInstances(params) {
+  const options = spaceListOptions(params)
+  const values = []
+  const conditions = ['i.deleted_at IS NULL']
+  if (options.search) {
+    values.push(`%${options.search.replace(/[\\%_]/g, '\\$&')}%`)
+    conditions.push(`(i.name ILIKE $${values.length} OR t.name ILIKE $${values.length} OR i.version ILIKE $${values.length}
+      OR EXISTS (SELECT 1 FROM instance_members im JOIN users u ON u.id=im.user_id WHERE im.instance_id=i.id
+        AND (u.username ILIKE $${values.length} OR u.display_name ILIKE $${values.length})))`)
+  }
+  if (options.status !== 'all') { values.push(options.status); conditions.push(`i.status=$${values.length}`) }
+  const where = conditions.join(' AND ')
+  const total = Number((await pool.query(`SELECT count(*)::int AS total FROM instances i JOIN tenants t ON t.id=i.tenant_id WHERE ${where}`, values)).rows[0].total)
+  const page = Math.min(options.page, Math.max(1, Math.ceil(total / options.pageSize)))
+  const rows = await pool.query(`SELECT ${instanceColumns} FROM instances i ${instanceJoins} WHERE ${where}
+    ORDER BY i.created_at DESC,i.id DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`, [...values, options.pageSize, (page - 1) * options.pageSize])
+  const stats = (await pool.query(`SELECT count(*)::int AS total,
+    count(*) FILTER (WHERE status='running')::int AS running, count(*) FILTER (WHERE status='stopped')::int AS stopped,
+    (SELECT count(*)::int FROM instance_members im JOIN instances active ON active.id=im.instance_id WHERE active.deleted_at IS NULL) AS members
+    FROM instances WHERE deleted_at IS NULL`)).rows[0]
+  return { instances: rows.rows, total, page, pageSize: options.pageSize, summary: stats }
+}
+
+export async function beginSpaceDeletion(id) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const row = (await client.query('SELECT status FROM instances WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [id])).rows[0]
+    if (!row) { await client.query('COMMIT'); return false }
+    if (['provisioning','starting','stopping'].includes(row.status)) throw new Error('空间正在变更状态，请待操作完成后再删除')
+    const runs = await client.query("SELECT id FROM api_runs WHERE instance_id=$1 AND status IN ('queued','starting','running') LIMIT 1", [id])
+    if (runs.rowCount) throw new Error('空间仍有排队或执行中的 API 任务，请完成或取消后再删除')
+    await client.query("UPDATE instances SET status='deleting',error=NULL WHERE id=$1", [id])
+    await client.query('UPDATE api_credentials SET enabled=false WHERE instance_id=$1', [id])
+    await client.query("UPDATE api_definitions SET status='retired' WHERE instance_id=$1", [id])
+    await client.query('UPDATE api_releases SET retired_at=COALESCE(retired_at,now()) WHERE api_definition_id IN (SELECT id FROM api_definitions WHERE instance_id=$1)', [id])
+    await client.query('DELETE FROM admin_access_grants WHERE instance_id=$1', [id])
+    await client.query('COMMIT')
+    return true
+  } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+}
+
+export async function finishSpaceDeletion(id) {
+  await pool.query("UPDATE instances SET deleted_at=now(),status='deleted',error=NULL WHERE id=$1 AND status='deleting'", [id])
+}
+
+
+export async function listAdminUsers(params) {
+  const options = userListOptions(params), values = [], conditions = ['u.deleted_at IS NULL']
+  if (options.search) {
+    values.push(`%${options.search.replace(/[\\%_]/g, '\\$&')}%`)
+    conditions.push(`(u.username ILIKE $${values.length} OR u.display_name ILIKE $${values.length} OR t.name ILIKE $${values.length})`)
+  }
+  if (options.tenantId !== 'all') { values.push(options.tenantId); conditions.push(`u.tenant_id=$${values.length}`) }
+  if (options.role !== 'all') { values.push(options.role); conditions.push(`u.role=$${values.length}`) }
+  if (options.status !== 'all') { values.push(options.status === 'true'); conditions.push(`u.enabled=$${values.length}`) }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+  const total = Number((await pool.query(`SELECT count(*)::int AS total FROM users u JOIN tenants t ON t.id=u.tenant_id ${where}`, values)).rows[0].total)
+  const page = Math.min(options.page, Math.max(1, Math.ceil(total / options.pageSize)))
+  const users = (await pool.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id ${where}
+    ORDER BY u.created_at DESC,u.id DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`, [...values,options.pageSize,(page - 1)*options.pageSize])).rows
+  return { users, total, page, pageSize: options.pageSize }
+}
+
+export async function tenantById(id) {
+  return (await pool.query('SELECT id,name,code FROM tenants WHERE id=$1 AND deleted_at IS NULL', [id])).rows[0]
+}
+
+export async function updateTenant(id, { name, code }) {
+  return (await pool.query('UPDATE tenants SET name=$2,code=$3 WHERE id=$1 AND deleted_at IS NULL RETURNING id,name,code', [id,name,code])).rows[0]
+}
+
+export async function deleteTenant(id, confirmName) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const tenant = (await client.query('SELECT id,name,code FROM tenants WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [id])).rows[0]
+    if (!tenant) throw new Error('租户不存在或已删除')
+    if (tenant.name !== confirmName) throw new Error('请输入完整租户名称确认')
+    if (tenant.code === 'default') throw new Error('默认租户不能删除')
+    const counts = (await client.query(`SELECT (SELECT count(*)::int FROM users WHERE tenant_id=$1 AND deleted_at IS NULL) AS users,
+      (SELECT count(*)::int FROM instances WHERE tenant_id=$1 AND deleted_at IS NULL) AS spaces`, [id])).rows[0]
+    if (counts.users || counts.spaces) throw new Error(`租户仍有 ${counts.users} 位用户、${counts.spaces} 个空间，请先迁移或删除后再操作`)
+    await client.query('UPDATE tenants SET deleted_at=now() WHERE id=$1', [id])
+    await client.query('COMMIT')
+    return tenant
+  } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+}
+
+export async function deleteUser(id, confirmName) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const target = (await client.query('SELECT id,username,role FROM users WHERE id=$1 AND deleted_at IS NULL FOR UPDATE', [id])).rows[0]
+    if (!target) throw new Error('用户不存在或已删除')
+    if (target.role === 'platform_admin') throw new Error('平台管理员不能删除')
+    if (target.username !== confirmName) throw new Error('请输入完整用户名确认')
+    const owned = await client.query(`SELECT i.name FROM instance_members im JOIN instances i ON i.id=im.instance_id
+      WHERE im.user_id=$1 AND im.access_role='owner' AND i.deleted_at IS NULL`, [id])
+    if (owned.rowCount) throw new Error(`用户仍是 ${owned.rowCount} 个空间的负责人，请先移交负责人或删除空间`)
+    await client.query('UPDATE users SET deleted_at=now(),enabled=false,mcp_admin=false,api_admin=false WHERE id=$1', [id])
+    await client.query('DELETE FROM sessions WHERE user_id=$1', [id])
+    await client.query('DELETE FROM instance_members WHERE user_id=$1', [id])
+    await client.query('UPDATE api_credentials SET enabled=false WHERE created_by=$1', [id])
+    await client.query('COMMIT')
+    return target
+  } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+}
+
+const modelProviderColumns = `p.id,p.code,p.name,p.config,p.enabled,p.created_at AS "createdAt",p.updated_at AS "updatedAt"`
+export async function listModelProviders() {
+  return (await pool.query(`SELECT ${modelProviderColumns},(SELECT count(*)::int FROM space_model_configs c JOIN instances i ON i.id=c.instance_id
+    WHERE p.id=ANY(c.provider_ids) AND i.deleted_at IS NULL AND i.status<>'deleting') AS "spaceCount" FROM model_providers p ORDER BY p.updated_at DESC`)).rows
+}
+export async function modelProviderById(id) {
+  return (await pool.query(`SELECT ${modelProviderColumns} FROM model_providers p WHERE p.id=$1`,[id])).rows[0]
+}
+export async function saveModelProvider(id, value, actorId) {
+  const client=await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const existing=(await client.query('SELECT code FROM model_providers WHERE id=$1 FOR UPDATE',[id])).rows[0]
+    if(existing && existing.code!==value.code) throw new Error('提供方编码创建后不可修改')
+    await client.query(`INSERT INTO model_providers(id,code,name,config,enabled,created_by) VALUES($1,$2,$3,$4,$5,$6)
+      ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,config=EXCLUDED.config,enabled=EXCLUDED.enabled,updated_at=now()`,[id,value.code,value.name,value.config,value.enabled,actorId])
+    await client.query("UPDATE space_model_configs SET revision=revision+1,sync_status='pending' WHERE $1=ANY(provider_ids)",[id])
+    await client.query('COMMIT')
+  } catch(error) {await client.query('ROLLBACK');throw error} finally {client.release()}
+  return modelProviderById(id)
+}
+export async function modelProviderSpaces(id) {
+  return (await pool.query(`SELECT i.id,i.name,i.slug,i.version,i.status,c.sync_status AS "syncStatus",c.revision
+    FROM space_model_configs c JOIN instances i ON i.id=c.instance_id WHERE $1=ANY(c.provider_ids) AND i.deleted_at IS NULL AND i.status<>'deleting' ORDER BY i.created_at DESC`,[id])).rows
+}
+export async function deleteModelProvider(id, confirmName) {
+  const client=await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const provider=(await client.query('SELECT id,name FROM model_providers WHERE id=$1 FOR UPDATE',[id])).rows[0]
+    if(!provider){await client.query('COMMIT');return}
+    if(provider.name!==confirmName)throw new Error('提供方不存在或确认名称不匹配')
+    const spaces=await client.query(`SELECT 1 FROM space_model_configs c JOIN instances i ON i.id=c.instance_id
+      WHERE $1=ANY(c.provider_ids) AND i.deleted_at IS NULL`,[id])
+    if(spaces.rowCount)throw new Error('请先从所有空间取消接入，再删除提供方')
+    await client.query('UPDATE space_model_configs SET default_provider_id=NULL,default_model=NULL WHERE default_provider_id=$1',[id])
+    await client.query('DELETE FROM model_providers WHERE id=$1',[id])
+    await client.query('COMMIT')
+  } catch(error) {await client.query('ROLLBACK');throw error} finally {client.release()}
+}
+export async function spaceModelConfig(instanceId) {
+  const config=(await pool.query(`SELECT provider_ids AS "providerIds",default_provider_id AS "defaultProviderId",default_model AS "defaultModel",revision,sync_status AS "syncStatus",synced_at AS "syncedAt" FROM space_model_configs WHERE instance_id=$1`,[instanceId])).rows[0]
+  return config || {providerIds:[],defaultProviderId:null,defaultModel:null,revision:0,syncStatus:'unmanaged',syncedAt:null}
+}
+export async function saveSpaceModelConfig(instanceId, input) {
+  if(!Array.isArray(input.providerIds)||input.providerIds.length>100||new Set(input.providerIds).size!==input.providerIds.length||input.providerIds.some(id=>!isUuid(id)))throw new Error('模型提供方列表无效')
+  if(!Number.isInteger(input.revision)||input.revision<0)throw new Error('配置版本无效，请刷新后重试')
+  if(input.defaultProviderId && !input.providerIds.includes(input.defaultProviderId))throw new Error('默认模型必须属于已接入的提供方')
+  const client=await pool.connect()
+  try {
+    await client.query('BEGIN')
+    if(!(await client.query("SELECT id FROM instances WHERE id=$1 AND deleted_at IS NULL AND status<>'deleting' FOR UPDATE",[instanceId])).rowCount)throw new Error('空间不存在或正在删除')
+    const providers=(await client.query('SELECT id,enabled,config FROM model_providers WHERE id=ANY($1::uuid[]) FOR SHARE',[input.providerIds])).rows
+    const current=(await client.query('SELECT revision FROM space_model_configs WHERE instance_id=$1 FOR UPDATE',[instanceId])).rows[0]
+    if((current?.revision||0)!==input.revision)throw new Error('模型配置已变化，请刷新后重新保存')
+    if(providers.length!==input.providerIds.length)throw new Error('提供方不存在')
+    if(input.defaultProviderId){const p=providers.find(p=>p.id===input.defaultProviderId);if(!p?.enabled||!p.config.models.some(m=>m.id===input.defaultModel))throw new Error('默认模型不存在或提供方已停用')}
+    await client.query(`INSERT INTO space_model_configs(instance_id,provider_ids,default_provider_id,default_model) VALUES($1,$2,$3,$4)
+      ON CONFLICT(instance_id) DO UPDATE SET provider_ids=EXCLUDED.provider_ids,default_provider_id=EXCLUDED.default_provider_id,default_model=EXCLUDED.default_model,revision=space_model_configs.revision+1,sync_status='pending'`,[instanceId,input.providerIds,input.defaultProviderId||null,input.defaultProviderId?input.defaultModel:null])
+    await client.query('COMMIT')
+  } catch(error){await client.query('ROLLBACK');throw error} finally {client.release()}
+  return spaceModelConfig(instanceId)
+}
+export async function markModelSync(instanceId,revision,status) {
+  await pool.query("UPDATE space_model_configs SET sync_status=$3,synced_at=CASE WHEN $3='synced' THEN now() ELSE synced_at END WHERE instance_id=$1 AND revision=$2",[instanceId,revision,status])
+}
+
+function isUuid(value) { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) }

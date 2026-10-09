@@ -26,11 +26,11 @@
 
 ## 企业版 DSH 镜像
 
-企业版使用独立的工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.2-arm64`。它从社区 DSH 镜像派生，不覆盖社区镜像，并针对私有化环境移除 DeepSeek 官方模型引导、官方 DeepSeek 提供方入口和 DeepSeek 网页搜索提供方。
+企业版使用独立的工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.3-arm64`。它从社区 DSH 镜像派生，不覆盖社区镜像，并针对私有化环境移除 DeepSeek 官方模型引导、官方 DeepSeek 提供方入口和 DeepSeek 网页搜索提供方。
 
 ```bash
 docker build -f deploy/dsh-enterprise/Dockerfile \
-  -t bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.2-arm64 .
+  -t bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.3-arm64 .
 ```
 
 ## 项目边界
@@ -53,21 +53,21 @@ docs/                生产就绪与运维文档
 
 ## 本地构建与部署
 
-当前本机示例使用基于 DSH `0.1.5-rc.2` 的观因 ARM64 工作空间镜像 `bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64`。
+当前本机示例使用企业版控制面 `0.7.2-enterprise` 和 ARM64 工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.3-arm64`。
 
 ```bash
-docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.7.0 .
-docker save guanyin/control-plane:0.7.0 |
+docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.7.2-enterprise .
+docker save guanyin/control-plane:0.7.2-enterprise |
   docker exec -i desktop-control-plane ctr -n k8s.io images import -
-docker save bankops/guanyin-dsh:0.1.5-rc.2-gy.1-arm64 |
+docker save bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.3-arm64 |
   docker exec -i desktop-control-plane ctr -n k8s.io images import -
 
 kubectl apply -f deploy/kubernetes.yaml
-kubectl -n guanyin-system rollout status statefulset/guanyin-postgres
-kubectl -n guanyin-system rollout status deployment/guanyin-control-plane
+kubectl -n guanyin-enterprise-system rollout status statefulset/guanyin-enterprise-postgres
+kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-enterprise-control-plane
 ```
 
-默认通过 `http://127.0.0.1:18080` 访问。manifest 中的数据库口令和管理员初始口令仅供本地开发，不能直接用于生产。
+默认通过 `http://127.0.0.1:18081` 访问。manifest 中的数据库口令和管理员初始口令仅供本地开发，不能直接用于生产。
 
 ## 检查
 

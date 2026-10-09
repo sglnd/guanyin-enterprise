@@ -2,6 +2,7 @@ import http from 'node:http'
 import net from 'node:net'
 import { readFile } from 'node:fs/promises'
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { synchronizeModels } from './model-sync.mjs'
 
 const upstreamHost = '127.0.0.1'
 const upstreamPort = 3081
@@ -73,7 +74,7 @@ function upstreamRequest(path, options = {}, body) {
 async function dshSessionCookie() {
   const webToken = await token()
   if (!webToken) throw new Error('DSH authentication token is not ready')
-  const response = await upstreamRequest(`/?token=${encodeURIComponent(webToken)}`, { method: 'GET', headers: { host: '127.0.0.1:18080' } })
+  const response = await upstreamRequest(`/?token=${encodeURIComponent(webToken)}`, { method: 'GET', headers: { host: '127.0.0.1:18081' } })
   const cookies = response.headers['set-cookie'] || []
   const cookie = cookies.map(value => value.split(';', 1)[0]).find(value => value.startsWith('dsh-auth-'))
   if (!cookie) throw new Error(`DSH authentication exchange failed with HTTP ${response.status}`)
@@ -90,7 +91,7 @@ async function handleGuanyinMcp(req, res, endpoint) {
     const body = JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload })
     const response = await upstreamRequest(`/mcp-manager/${endpoint}`, {
       method: 'POST',
-      headers: { host: '127.0.0.1:18080', cookie: await dshSessionCookie(), 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      headers: { host: '127.0.0.1:18081', cookie: await dshSessionCookie(), 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
     }, body)
     res.writeHead(response.status, { 'content-type': response.headers['content-type'] || 'application/json' })
     res.end(response.body)
@@ -125,7 +126,7 @@ async function handleGuanyinSessionRpc(req, res, method) {
     const body = JSON.stringify({ type: 'client-request', rpcId, method, payload: { args } })
     const response = await upstreamRequest(`/api/${method}`, {
       method: 'POST',
-      headers: { host: '127.0.0.1:18080', cookie: await dshSessionCookie(), 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      headers: { host: '127.0.0.1:18081', cookie: await dshSessionCookie(), 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
     }, body)
     res.writeHead(response.status, { 'content-type': response.headers['content-type'] || 'application/json' })
     res.end(response.body)
@@ -137,6 +138,27 @@ async function handleGuanyinSessionRpc(req, res, method) {
 
 const server = http.createServer(async (req, res) => {
   let path = req.url || '/'
+  if (path === '/__guanyin/models/sync') {
+    if (req.method !== 'POST' || !isGuanyinRequest(req)) { res.writeHead(404).end(); return }
+    try {
+      const cookie = await dshSessionCookie()
+      const result = await synchronizeModels(await readJson(req, 8 * 1024 * 1024), async (method, args) => {
+        const body = JSON.stringify({ type: 'client-request', rpcId: randomUUID(), method, payload: { args } })
+        const response = await upstreamRequest(`/api/${method}`, { method: 'POST', headers: {
+          host: '127.0.0.1:18081', cookie, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body),
+        } }, body)
+        const data = JSON.parse(response.body.toString('utf8'))
+        if (response.status >= 300 || !data.result?.ok) throw new Error('DSH model settings RPC failed')
+        return data.result.value
+      })
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ ok: true, ...result }))
+    } catch {
+      res.writeHead(502, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ error: '模型同步失败，请检查模型配置、凭证服务及设置版本后重试' }))
+    }
+    return
+  }
   if (req.method === 'GET' && path === '/__guanyin/identity') {
     try {
       const body = JSON.stringify(publicIdentity(verifyIdentity(req)))
@@ -210,7 +232,7 @@ server.on('upgrade', async (req, socket, head) => {
         if (name === 'host' || name === 'cookie' || name === 'x-guanyin-token' || value === undefined) continue
         lines.push(`${name}: ${Array.isArray(value) ? value.join(', ') : value}`)
       }
-      lines.push('host: 127.0.0.1:18080', `cookie: ${cookie}`)
+      lines.push('host: 127.0.0.1:18081', `cookie: ${cookie}`)
     } else {
       for (let index = 0; index < req.rawHeaders.length; index += 2) lines.push(`${req.rawHeaders[index]}: ${req.rawHeaders[index + 1]}`)
     }

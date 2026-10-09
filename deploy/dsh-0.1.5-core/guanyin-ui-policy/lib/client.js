@@ -213,6 +213,9 @@ window.__ModuleLoader__.load({
       const style = document.createElement('style')
       style.id = 'guanyin-brand-styles'
       style.textContent = `
+        /* File browsing lives in better-sidebar. Keep native preview modules and
+           their close/fullscreen controls available for direct file links. */
+        button[data-sidebar-right-expand] { display:none!important; }
         .dcu-brand[data-guanyin-brand=true] { gap:9px; color:var(--dcu-sidebar-primary); }
         .dcu-guanyin-logo { display:inline-block; flex:none; width:25px; height:25px; color:inherit; background:currentColor; -webkit-mask:url('/__guanyin/brand/logo.png') center/contain no-repeat; mask:url('/__guanyin/brand/logo.png') center/contain no-repeat; }
         .dcu-guanyin-logo--hero { width:35px; height:35px; color:var(--dsw-alias-label-primary,#fff); }
