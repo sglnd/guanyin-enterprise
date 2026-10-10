@@ -60,8 +60,8 @@ DSH 内部 `POST /__guanyin/models/sync` 仅接受空间内部管理令牌，平
 
 ```sh
 kubectl apply -f deploy/production/rbac-instance-manager.yaml
-kubectl auth can-i delete deployments.apps --as=system:serviceaccount:guanyin-system:guanyin-control-plane -n guanyin-instances
-kubectl auth can-i delete secrets --as=system:serviceaccount:guanyin-system:guanyin-control-plane -n guanyin-instances
+kubectl auth can-i delete deployments.apps --as=system:serviceaccount:guanyin-enterprise-system:guanyin-control-plane -n guanyin-enterprise-instances
+kubectl auth can-i delete secrets --as=system:serviceaccount:guanyin-enterprise-system:guanyin-control-plane -n guanyin-enterprise-instances
 ```
 
 检查结果应为 yes；PVC 没有 delete 授权。停在“删除中”的空间可在管理中重试删除，无需手工改数据库。

@@ -4,8 +4,8 @@
 
 运行时仅需要三张镜像：
 
-- `guanyin/control-plane:0.7.2-enterprise.1-amd64`
-- `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-amd64`
+- `guanyin/control-plane:0.7.2-enterprise.2-amd64`
+- `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.5-amd64`
 - `guanyin/postgres:17.6-alpine-amd64`
 
 `image-list.txt` 和 `platform.txt` 记录交付包的实际镜像名称、镜像 ID 与 CPU 架构。每个离线包只能部署到 `platform.txt` 所列架构的节点。先在生产集群执行：
@@ -121,10 +121,11 @@ kubectl auth can-i create deployments.apps \
 
 ## 7. 升级与回滚
 
-升级时先备份数据库，再在三个节点导入新镜像。将控制面更新到 `guanyin/control-plane:0.7.2-enterprise.1-amd64`，并把控制面的 `DSH_IMAGE`、`DSH_VERSION` 更新为企业 DSH `0.1.5-rc.2-gy.ent.4`。这只决定新建空间使用的镜像；已有空间不会自动迁移。执行 `kubectl apply` 前必须把交付清单中的 `licensePublicKey` 占位内容替换为当前集群实际公钥，避免覆盖 ConfigMap 后使已保存 License 失效。
+升级时先备份数据库，再在三个节点导入新镜像。将控制面更新到 `guanyin/control-plane:0.7.2-enterprise.2-amd64`，并把控制面的 `DSH_IMAGE`、`DSH_VERSION` 更新为企业 DSH `0.1.5-rc.2-gy.ent.5`。这只决定新建空间使用的镜像；已有空间不会自动迁移。执行 `kubectl apply` 前必须把交付清单中的 `licensePublicKey` 占位内容替换为当前集群实际公钥，避免覆盖 ConfigMap 后使已保存 License 失效。
 
 ```bash
 kubectl -n guanyin-enterprise-system create job --from=cronjob/guanyin-postgres-backup guanyin-backup-before-upgrade
+kubectl apply -f rbac-instance-manager.yaml
 kubectl apply -f kubernetes.yaml
 kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-control-plane
 ```
@@ -133,7 +134,7 @@ kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-control-p
 
 ```bash
 kubectl -n guanyin-enterprise-instances set image deployment/dsh-<space-slug> \
-  dsh=bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-amd64
+  dsh=bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.5-amd64
 kubectl -n guanyin-enterprise-instances rollout status deployment/dsh-<space-slug> --timeout=10m
 ```
 
@@ -150,7 +151,7 @@ kubectl -n guanyin-enterprise-system rollout undo deployment/guanyin-control-pla
 
 ```bash
 kubectl -n guanyin-enterprise-instances set image deployment/dsh-<space-slug> \
-  dsh=bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.3-amd64
+  dsh=bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-amd64
 kubectl -n guanyin-enterprise-instances rollout status deployment/dsh-<space-slug> --timeout=10m
 ```
 

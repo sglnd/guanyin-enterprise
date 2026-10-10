@@ -163,7 +163,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: control-plane
-          image: guanyin/control-plane:0.7.2-enterprise.1-amd64
+          image: guanyin/control-plane:0.7.2-enterprise.2-amd64
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -179,11 +179,11 @@ spec:
             - name: API_BUILDER_MCP_URL
               value: http://guanyin-control-plane.guanyin-enterprise-system.svc.cluster.local:8080/internal/mcp/api-builder
             - name: DSH_IMAGE
-              value: bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-amd64
+              value: bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.5-amd64
             - name: DSH_IMAGE_PULL_POLICY
               value: IfNotPresent
             - name: DSH_VERSION
-              value: 0.1.5-rc.2-gy.ent.4
+              value: 0.1.5-rc.2-gy.ent.5
             - name: DSH_NAMESPACE
               value: guanyin-enterprise-instances
             - name: DSH_TRUSTED_HOSTS

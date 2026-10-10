@@ -26,11 +26,11 @@
 
 ## 企业版 DSH 镜像
 
-企业版使用独立的工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-arm64`。它从社区 DSH 镜像派生，不覆盖社区镜像，并强制覆盖为观因 UI，同时针对私有化环境移除 DeepSeek 官方模型引导、官方 DeepSeek 提供方入口和 DeepSeek 网页搜索提供方。
+企业版使用独立的工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.5-arm64`。它从社区 DSH 镜像派生，不覆盖社区镜像，并强制覆盖为观因 UI，同时针对私有化环境移除 DeepSeek 官方模型引导、官方 DeepSeek 提供方入口和 DeepSeek 网页搜索提供方。
 
 ```bash
 docker build -f deploy/dsh-enterprise/Dockerfile \
-  -t bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-arm64 .
+  -t bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.5-arm64 .
 ```
 
 ## 项目边界
@@ -53,13 +53,13 @@ docs/                生产就绪与运维文档
 
 ## 本地构建与部署
 
-当前本机示例使用企业版控制面 `0.7.2-enterprise.1` 和 ARM64 工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-arm64`。
+当前本机示例使用企业版控制面 `0.7.2-enterprise.2` 和 ARM64 工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.5-arm64`。
 
 ```bash
-docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.7.2-enterprise.1 .
-docker save guanyin/control-plane:0.7.2-enterprise.1 |
+docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.7.2-enterprise.2 .
+docker save guanyin/control-plane:0.7.2-enterprise.2 |
   docker exec -i desktop-control-plane ctr -n k8s.io images import -
-docker save bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-arm64 |
+docker save bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.5-arm64 |
   docker exec -i desktop-control-plane ctr -n k8s.io images import -
 
 kubectl apply -f deploy/kubernetes.yaml

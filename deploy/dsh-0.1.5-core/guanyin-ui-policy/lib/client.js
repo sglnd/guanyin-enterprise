@@ -217,8 +217,8 @@ window.__ModuleLoader__.load({
            their close/fullscreen controls available for direct file links. */
         button[data-sidebar-right-expand] { display:none!important; }
         .dcu-brand[data-guanyin-brand=true] { gap:9px; color:var(--dcu-sidebar-primary); }
-        .dcu-guanyin-logo { display:inline-block; flex:none; width:25px; height:25px; color:inherit; background:currentColor; -webkit-mask:url('/__guanyin/brand/logo.png') center/contain no-repeat; mask:url('/__guanyin/brand/logo.png') center/contain no-repeat; }
-        .dcu-guanyin-logo--hero { width:35px; height:35px; color:var(--dsw-alias-label-primary,#fff); }
+        .dcu-guanyin-logo { display:inline-block; flex:none; width:38px; height:25px; background:transparent url('/__guanyin/brand/logo.png') center/contain no-repeat; }
+        .dcu-guanyin-logo--hero { width:70px; height:35px; }
         .dcu-guanyin-scenario-description { width:100%; box-sizing:border-box; margin:0; padding:12px 16px; border:1px solid var(--dsw-alias-border-primary,rgba(255,255,255,.12)); border-radius:12px; color:var(--dsw-alias-label-secondary,rgba(255,255,255,.72)); font-size:14px; line-height:1.6; }
         [class*="_titleGroup"]::before { display:none!important; content:none!important; }
         .dcu-brand[data-guanyin-brand=true] strong { overflow:hidden; font-size:18px; line-height:24px; font-weight:650; letter-spacing:.08em; text-overflow:ellipsis; white-space:nowrap; }

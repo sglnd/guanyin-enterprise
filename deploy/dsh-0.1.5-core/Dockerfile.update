@@ -1,10 +1,11 @@
 # Update a prebuilt enterprise runtime without downloading the pinned plugin archive set.
-ARG BASE_IMAGE=bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.3-arm64
+ARG BASE_IMAGE=bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-arm64
 FROM ${BASE_IMAGE}
 USER root
 COPY deploy/dsh-0.1.5-core/guanyin-ui-policy/lib/client.js /tmp/guanyin-ui-client.js
+COPY assets/branding/guanyin-mark-graphite-cinnabar-v4.png /opt/dsh-runtime/guanyin-logo.png
 RUN cp /tmp/guanyin-ui-client.js /opt/dsh-seed/profiles/web/node_modules/@guanyin/dsh-ui-policy/lib/client.js \
-    && printf '%s\n' 'dsh=0.1.5-rc.2' 'profile=guanyin-enterprise-v4' > /opt/dsh-seed/.bankops-release \
+    && printf '%s\n' 'dsh=0.1.5-rc.2' 'profile=guanyin-enterprise-v5' > /opt/dsh-seed/.bankops-release \
     && rm /tmp/guanyin-ui-client.js \
     && chown -R node:node /opt/dsh-seed/profiles/web/node_modules/@guanyin/dsh-ui-policy /opt/dsh-seed/.bankops-release
 COPY deploy/dsh-0.1.5-core/model-sync.mjs /opt/dsh-runtime/model-sync.mjs
@@ -12,9 +13,10 @@ COPY deploy/dsh-0.1.5-core/web-proxy.mjs /opt/dsh-runtime/web-proxy.mjs
 COPY deploy/dsh-0.1.5-core/entrypoint.sh /usr/local/bin/dsh-core-entrypoint
 COPY deploy/dsh-enterprise/entrypoint.sh /usr/local/bin/guanyin-enterprise-entrypoint
 RUN chmod 0755 /usr/local/bin/dsh-core-entrypoint /usr/local/bin/guanyin-enterprise-entrypoint
-LABEL org.opencontainers.image.version="0.1.5-rc.2-gy.ent.4" \
+LABEL org.opencontainers.image.version="0.1.5-rc.2-gy.ent.5" \
       io.guanyin.models-contract="1" \
       io.guanyin.edition="enterprise" \
-      io.guanyin.profile="guanyin-enterprise-v4"
+      io.guanyin.profile="guanyin-enterprise-v5"
 USER node
 ENTRYPOINT ["guanyin-enterprise-entrypoint"]
+CMD ["dsh", "--profile", "web", "--host", "127.0.0.1", "--port", "3081", "--no-open"]

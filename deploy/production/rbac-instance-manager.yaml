@@ -2,7 +2,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: guanyin-instance-manager
-  namespace: guanyin-instances
+  namespace: guanyin-enterprise-instances
 rules:
   - apiGroups: [""]
     resources: ["services", "secrets", "configmaps"]
@@ -18,11 +18,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: guanyin-instance-manager
-  namespace: guanyin-instances
+  namespace: guanyin-enterprise-instances
 subjects:
   - kind: ServiceAccount
     name: guanyin-control-plane
-    namespace: guanyin-system
+    namespace: guanyin-enterprise-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
