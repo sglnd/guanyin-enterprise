@@ -755,8 +755,9 @@ export async function finishSpaceDeletion(id) {
 }
 
 
-export async function listAdminUsers(params) {
+export async function listAdminUsers(params, { memberCandidates = false } = {}) {
   const options = userListOptions(params), values = [], conditions = ['u.deleted_at IS NULL']
+  if (memberCandidates) conditions.push("u.role<>'platform_admin'")
   if (options.search) {
     values.push(`%${options.search.replace(/[\\%_]/g, '\\$&')}%`)
     conditions.push(`(u.username ILIKE $${values.length} OR u.display_name ILIKE $${values.length} OR t.name ILIKE $${values.length})`)
@@ -842,16 +843,17 @@ export async function modelProviderSpaces(id) {
   return (await pool.query(`SELECT i.id,i.name,i.slug,i.version,i.status,c.sync_status AS "syncStatus",c.revision
     FROM space_model_configs c JOIN instances i ON i.id=c.instance_id WHERE $1=ANY(c.provider_ids) AND i.deleted_at IS NULL AND i.status<>'deleting' ORDER BY i.created_at DESC`,[id])).rows
 }
-export async function deleteModelProvider(id, confirmName) {
+export async function deleteModelProvider(id, confirmName, removeCredential = async () => {}) {
   const client=await pool.connect()
   try {
     await client.query('BEGIN')
     const provider=(await client.query('SELECT id,name FROM model_providers WHERE id=$1 FOR UPDATE',[id])).rows[0]
-    if(!provider){await client.query('COMMIT');return}
+    if(!provider){await removeCredential();await client.query('COMMIT');return}
     if(provider.name!==confirmName)throw new Error('提供方不存在或确认名称不匹配')
     const spaces=await client.query(`SELECT 1 FROM space_model_configs c JOIN instances i ON i.id=c.instance_id
       WHERE $1=ANY(c.provider_ids) AND i.deleted_at IS NULL`,[id])
     if(spaces.rowCount)throw new Error('请先从所有空间取消接入，再删除提供方')
+    await removeCredential()
     await client.query('UPDATE space_model_configs SET default_provider_id=NULL,default_model=NULL WHERE default_provider_id=$1',[id])
     await client.query('DELETE FROM model_providers WHERE id=$1',[id])
     await client.query('COMMIT')
@@ -881,7 +883,15 @@ export async function saveSpaceModelConfig(instanceId, input) {
   return spaceModelConfig(instanceId)
 }
 export async function markModelSync(instanceId,revision,status) {
-  await pool.query("UPDATE space_model_configs SET sync_status=$3,synced_at=CASE WHEN $3='synced' THEN now() ELSE synced_at END WHERE instance_id=$1 AND revision=$2",[instanceId,revision,status])
+  const result=await pool.query("UPDATE space_model_configs SET sync_status=$3,synced_at=CASE WHEN $3='synced' THEN now() ELSE synced_at END WHERE instance_id=$1 AND revision=$2",[instanceId,revision,status])
+  return result.rowCount > 0
 }
 
 function isUuid(value) { return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) }
+
+export async function listPendingModelSyncInstances() {
+  return (await pool.query(`SELECT i.id,i.slug FROM instances i
+    JOIN space_model_configs c ON c.instance_id=i.id
+    WHERE i.deleted_at IS NULL AND i.status<>'deleting' AND c.revision>0
+      AND c.sync_status IN ('pending','error') ORDER BY i.created_at`)).rows
+}

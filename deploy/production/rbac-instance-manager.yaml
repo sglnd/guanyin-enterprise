@@ -1,0 +1,29 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: guanyin-instance-manager
+  namespace: guanyin-instances
+rules:
+  - apiGroups: [""]
+    resources: ["services", "secrets", "configmaps"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: guanyin-instance-manager
+  namespace: guanyin-instances
+subjects:
+  - kind: ServiceAccount
+    name: guanyin-control-plane
+    namespace: guanyin-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: guanyin-instance-manager

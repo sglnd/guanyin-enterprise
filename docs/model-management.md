@@ -8,7 +8,7 @@
 
 - 名称、唯一编码（创建后不能修改）。
 - API 协议：`openai-completions`、`openai-responses`、`anthropic-messages`。
-- `baseURL`：基础地址。Chat Completions 的 `/chat/completions` 后缀自动去掉，SDK 会补上；保存时不会自动探测用户提供的地址。
+- `baseURL`：基础地址。按协议自动去掉 `/chat/completions`、`/responses`、`/messages` 后缀，SDK 会补上；保存时不会自动探测用户提供的地址。
 - API Key：创建必填，修改留空保留原值；仅存 Kubernetes Secret `guanyin-model-<UUID>`，不存平台数据库、不回显、不写审计。
 - 流空闲超时：默认 600000 毫秒。
 - 模型列表 JSON，例如：
@@ -17,7 +17,7 @@
 [{"reasoningEfforts":{"off":null,"low":"low","medium":"medium","high":"high"}}]
 ```
 
-- 模型 JSON 无需重复填写 `id`、`name`：省略时分别使用提供方编码和显示名称。提供方编码应填写网关接受的模型 ID（例如 `deepseek-v4-flash-0731-int8`）。已有显式 ID、名称保持兼容；同一提供方登记多个模型时仍可显式指定不同 ID。
+- 模型 JSON 无需重复填写 `id`、`name`：单模型省略时使用“调用模型名称”（留空则使用提供方编码）和显示名称。“调用模型名称”应填写网关接受的 model 值（例如 `glm-5`），与基础地址中的路由 UUID 独立。已有显式 ID、名称保持兼容；同一提供方登记多个模型时仍可显式指定不同 ID。
 - `compat` JSON，例如 `{"supportsReasoningEffort":true}`。
 - 非推理模型可省略 `reasoningEfforts` 或设置 `false`。`off:null` 表示该等级不发送推理参数；是否符合具体网关语义仍需实际业务验证。
 
@@ -38,7 +38,7 @@
 
 本功能需要同时构建新的控制面镜像和 DSH 镜像。DSH 镜像包含新增 `model-sync.mjs` 和更新的 `web-proxy.mjs`，标记 `io.guanyin.models-contract=1`。现有空间需要更新其 Deployment 的 DSH 镜像才能动态接收平台模型；仅更新平台默认 `DSH_IMAGE` 不会修改已创建空间锁定的镜像。
 
-数据库启动时自动新增 `model_providers` 与 `space_model_configs` 表。沿用现有 Secret 的创建、读取、更新、删除权限，不需要 PVC 删除权限。应先升级 DSH，再接入平台模型。
+数据库启动时自动新增 `model_providers` 与 `space_model_configs` 表。需要 Secret 的创建、读取、更新、删除权限；旧部署必须额外应用 `deploy/production/rbac-instance-manager.yaml`，仅更新镜像不会更新权限。不需要 PVC 删除权限。应先升级 DSH，再接入平台模型。
 
 平台接口均为 `/api/admin/` 下的管理员接口：
 
@@ -53,3 +53,27 @@ DSH 内部 `POST /__guanyin/models/sync` 仅接受空间内部管理令牌，平
 ## 测试连接
 
 新增和编辑提供方时可点击“测试连接”，使用当前表单配置向首个模型发送最小推理请求。编辑时密钥留空会复用已保存的 Secret；测试不保存配置、不接入空间。支持上述三种 API 协议，30 秒超时，显示耗时及鉴权、地址、限流等失败分类，不返回密钥或网关原始响应。测试可能产生少量调用费用，且仅验证管理平台到网关的连通性，不代表各空间的网络均可达。
+
+## 删除权限故障处理
+
+由集群管理员执行（仅更新 Role 和 RoleBinding，不修改业务配置）：
+
+```sh
+kubectl apply -f deploy/production/rbac-instance-manager.yaml
+kubectl auth can-i delete deployments.apps --as=system:serviceaccount:guanyin-system:guanyin-control-plane -n guanyin-instances
+kubectl auth can-i delete secrets --as=system:serviceaccount:guanyin-system:guanyin-control-plane -n guanyin-instances
+```
+
+检查结果应为 yes；PVC 没有 delete 授权。停在“删除中”的空间可在管理中重试删除，无需手工改数据库。
+
+旧版模型删除若显示 Secret forbidden，数据库记录可能已经删除，但 Secret 仍在。仅针对已确认不存在平台注册记录的提供方 ID，由管理员核对后删除其精确命名的 `guanyin-model-<提供方UUID>` Secret；禁止批量删除 Secret。不要删除仍在使用的模型或空间凭证。
+
+新版先验证删除权限，再在提供方数据库锁内删除对应 Secret；Secret 删除失败会回滚数据库删除。跨 Kubernetes 和 PostgreSQL 的操作无法原子提交，如 Secret 已删除后数据库提交失败，保留的模型可重填密钥或重试删除。
+
+测试连接发送实际 POST 推理请求，失败时显示实际请求地址和 model 值，不返回上游响应正文或密钥。404 本身不能证明是 model 值错误；核对请求路径和网关接受的模型名称后再修正，并重新测试、保存及同步接入空间。
+
+## 同步状态
+
+保存成功只表示平台配置已持久化。容器副本数为 0、尚未就绪或正在更新时，返回 pending，页面提示“实际尚未同步”。后台每 15 秒扫描待同步配置；容器就绪后自动同步，无需手工点击。容器未就绪的空间每 30 秒重试，接口失败每 60 秒重试；仍保留手动重新同步入口。平台重启后从数据库恢复待同步任务，删除中的空间不参与扫描。
+
+只有当前 Deployment 已就绪、DSH 管理接口确认接入目录、同步后 Deployment 仍就绪且代际未变，并成功标记对应配置版本时，才返回 synced。接口调用失败显示 error。保存提供方时，部分空间 pending 或 error 会单独提示；重新同步会清除旧提示并显示本次结果。

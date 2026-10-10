@@ -44,3 +44,14 @@ export function userListOptions(params) {
   if (tenantId !== 'all' && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId)) throw new Error('租户参数无效')
   return { ...options, status, role, tenantId }
 }
+
+// Check authorization before revoking access or changing database state.
+export async function requireDeletePermissions(request, namespace, resources) {
+  for (const [group, resource] of resources) {
+    const review = await request('POST', '/apis/authorization.k8s.io/v1/selfsubjectaccessreviews', {
+      apiVersion: 'authorization.k8s.io/v1', kind: 'SelfSubjectAccessReview',
+      spec: { resourceAttributes: { namespace, verb: 'delete', group, resource } },
+    })
+    if (review.status?.allowed !== true) throw new Error(`平台运行账户缺少 ${namespace} 中 ${resource} 的删除权限。请由集群管理员应用更新包中的 rbac-instance-manager.yaml 后重试；PVC 保留。`)
+  }
+}

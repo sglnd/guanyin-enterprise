@@ -16,7 +16,8 @@ export function modelProviderInput(input) {
   try { url = new URL(String(input.baseURL || '').trim()) } catch { throw new Error('baseURL 必须是有效的 HTTP(S) 地址') }
   if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('baseURL 不能包含账户、密码、查询参数或片段')
   url.pathname = url.pathname.replace(/\/+$/, '')
-  if (api === 'openai-completions') url.pathname = url.pathname.replace(/\/chat\/completions$/, '')
+  const endpoint = {'openai-completions': /\/chat\/completions$/, 'openai-responses': /\/responses$/, 'anthropic-messages': /\/messages$/}[api]
+  url.pathname = url.pathname.replace(endpoint, '')
   const timeout = Number(input.streamIdleTimeoutMs ?? 600000)
   if (!Number.isInteger(timeout) || timeout < 1000 || timeout > 3600000) throw new Error('流空闲超时须为 1000–3600000 毫秒')
   let models = input.models
@@ -27,7 +28,7 @@ export function modelProviderInput(input) {
     if (!object(model)) throw new Error('模型列表中的每一项必须是对象')
     const allowed = new Set(['id','name','contextWindow','maxTokens','reasoningEfforts','input'])
     if (Object.keys(model).some(k => !allowed.has(k))) throw new Error('模型包含不支持的字段')
-    const id = String(model.id || code).trim(), modelName = String(model.name || name).trim()
+    const id = String(model.id || (models.length === 1 && input.requestModel) || code).trim(), modelName = String(model.name || name).trim()
     if (!id || id.length > 200 || !modelName || modelName.length > 200 || ids.has(id)) throw new Error('模型 ID 不能为空或重复，最多 200 字')
     ids.add(id)
     const result = { ...model, id, name: modelName }
@@ -70,9 +71,9 @@ export async function testModelConnection(value, apiKey, fetcher = fetch) {
   try {
     const response=await fetcher(config.baseURL+path,{method:'POST',headers,body:JSON.stringify(body),signal,redirect:'error'})
     if(!response.ok) {
-      const reason=({401:'鉴权失败，请检查 API Key',403:'访问被拒绝，请检查模型权限',404:'接口或模型不存在，请检查地址和提供方编码',429:'请求受限或额度不足'})[response.status]||'网关返回错误'
+      const reason=({401:'鉴权失败，请检查 API Key',403:'访问被拒绝，请检查模型权限',404:'接口或调用模型不存在，请检查基础地址和调用模型名称；地址中的路由 UUID 不一定是模型名称',429:'请求受限或额度不足'})[response.status]||'网关返回错误'
       await response.body?.cancel()
-      return {ok:false,elapsedMs:Date.now()-started,message:`${reason}（HTTP ${response.status}）`}
+      return {ok:false,elapsedMs:Date.now()-started,message:`${reason}（HTTP ${response.status}）；测试使用 POST ${config.baseURL+path}，model=${model}`}
     }
     const data=await response.json()
     const valid=config.api==='anthropic-messages'?data.type==='message'&&Array.isArray(data.content):config.api==='openai-responses'?data.object==='response'&&Array.isArray(data.output):Array.isArray(data.choices)&&data.choices.some(c=>c.message&&typeof c.message==='object')
@@ -80,5 +81,42 @@ export async function testModelConnection(value, apiKey, fetcher = fetch) {
     return {ok:true,elapsedMs:Date.now()-started,message:'连接成功，模型已返回响应'}
   } catch {
     return {ok:false,elapsedMs:Date.now()-started,message:signal.aborted?'连接超时（30 秒），请检查网络或模型服务':'连接失败，请检查地址、网络、证书及响应格式'}
+  }
+}
+
+export function modelSyncDeploymentReady(deployment) {
+  const replicas = Number(deployment.spec?.replicas ?? 1)
+  const status = deployment.status || {}
+  return replicas > 0 && Number(status.observedGeneration || 0) >= Number(deployment.metadata?.generation || 0)
+    && Number(status.updatedReplicas || 0) >= replicas && Number(status.readyReplicas || 0) >= replicas
+    && Number(status.availableReplicas || 0) >= replicas
+}
+
+// Persistent pending/error state survives platform restarts; local backoff bounds retries.
+export function createModelSyncReconciler({ list, apply, isQueued = () => false, now = Date.now, log = () => {} }) {
+  let running = false, stopped = false
+  const retryAt = new Map()
+  return {
+    stop() { stopped = true },
+    async tick() {
+      if (running || stopped) return
+      running = true
+      try {
+        const instances = await list(), ids = new Set(instances.map(i => i.id))
+        for (const id of retryAt.keys()) if (!ids.has(id)) retryAt.delete(id)
+        for (const instance of instances) {
+          if (stopped) break
+          if (isQueued(instance.id) || (retryAt.get(instance.id) || 0) > now()) continue
+          try {
+            const result = await apply(instance)
+            if (result.status === 'synced' || result.status === 'unmanaged') retryAt.delete(instance.id)
+            else retryAt.set(instance.id, now() + 30_000)
+          } catch {
+            retryAt.set(instance.id, now() + 60_000)
+            log(`空间 ${instance.id} 模型自动同步失败，60 秒后重试`)
+          }
+        }
+      } finally { running = false }
+    },
   }
 }

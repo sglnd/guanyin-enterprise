@@ -7,8 +7,8 @@ import { extname, join } from 'node:path'
 import * as store from './store.mjs'
 import { ApiRunWorker, createDshAdapter, isTerminalApiRun, validateApiInput } from './api-runner.mjs'
 import { generateApiDocumentation, normalizeApiManifest } from './api-contract.mjs'
-import { removeSpaceResources } from './space-admin.mjs'
-import { modelProviderInput, managedProviderId, modelCredentialRef, testModelConnection } from './model-registry.mjs'
+import { removeSpaceResources, requireDeletePermissions } from './space-admin.mjs'
+import { modelProviderInput, managedProviderId, modelCredentialRef, testModelConnection, modelSyncDeploymentReady, createModelSyncReconciler } from './model-registry.mjs'
 import { managedMcpConfigMatches } from './mcp-sync.mjs'
 import { apiBuilderTools, executeApiBuilderTool, generateApiDraftWithAi } from './api-builder-mcp.mjs'
 import { createIdentityToken, withoutControlPlaneCookies, withoutInboundIdentityHeaders } from './guanyin-identity.mjs'
@@ -282,7 +282,7 @@ function applySpaceModels(instance) {
     if(!config.revision)return {status:'unmanaged'}
     try {
       const deployment=await k8sRequest('GET',`/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`)
-      if(!Number(deployment.spec.replicas||0)){await store.markModelSync(instance.id,config.revision,'pending');return {status:'pending'}}
+      if(!modelSyncDeploymentReady(deployment)){await store.markModelSync(instance.id,config.revision,'pending');return {status:'pending'}}
       const providers=[]
       for(const id of config.providerIds){
         const provider=await store.modelProviderById(id)
@@ -301,8 +301,12 @@ function applySpaceModels(instance) {
       const result=await response.json().catch(()=>({}))
       if(!response.ok || result.ok!==true || !Array.isArray(result.providers)
         || JSON.stringify([...result.providers].sort())!==JSON.stringify(providers.map(p=>p.id).sort()))throw new Error('DSH 模型同步失败，请确认空间镜像支持模型管理接口并重试')
-      await store.markModelSync(instance.id,config.revision,'synced')
-      return {status:'synced'}
+      const deploymentAfter=await k8sRequest('GET',`/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`)
+      if(!modelSyncDeploymentReady(deploymentAfter) || deploymentAfter.metadata?.generation!==deployment.metadata?.generation){
+        await store.markModelSync(instance.id,config.revision,'pending');return {status:'pending'}
+      }
+      const marked=await store.markModelSync(instance.id,config.revision,'synced')
+      return {status:marked?'synced':'pending'}
     } catch(error){await store.markModelSync(instance.id,config.revision,'error');throw new Error('模型配置已保存，同步失败；请检查空间状态、凭证和 DSH 镜像后重试')}
   })
   modelSyncQueues.set(instance.id,next)
@@ -912,8 +916,10 @@ async function api(req, res, path) {
   if(modelProvider && req.method==='DELETE') {
     const input=await bodyJson(req)
     try{
-      await store.deleteModelProvider(modelProvider[1],input.confirmName)
-      try{await k8sRequest('DELETE',`/api/v1/namespaces/${NAMESPACE}/secrets/guanyin-model-${modelProvider[1]}`)}catch(error){if(error.statusCode!==404)throw error}
+      await requireDeletePermissions(k8sRequest, NAMESPACE, [['','secrets']])
+      await store.deleteModelProvider(modelProvider[1],input.confirmName,async()=>{
+        try{await k8sRequest('DELETE',`/api/v1/namespaces/${NAMESPACE}/secrets/guanyin-model-${modelProvider[1]}`)}catch(error){if(error.statusCode!==404)throw error}
+      })
       await audit({actorUserId:user.id,action:'model_provider_delete',details:{providerId:modelProvider[1],ip:clientIp(req)}})
       return sendJson(res,200,{ok:true})
     }catch(error){return sendJson(res,409,{error:error.message})}
@@ -946,6 +952,17 @@ async function api(req, res, path) {
       await Promise.all(result.instances.map(refreshInstanceStatus))
       return sendJson(res, 200, await store.listAdminInstances(params))
     } catch (error) { return sendJson(res, 400, { error: error.message }) }
+  }
+  const memberCandidates = path.match(/^\/api\/admin\/instances\/([^/]+)\/member-candidates$/)
+  if (memberCandidates && req.method === 'GET') {
+    const instance = await store.instanceById(memberCandidates[1])
+    if (!instance) return sendJson(res,404,{error:'空间不存在或正在删除'})
+    try {
+      const params = new URL(req.url,'http://localhost').searchParams
+      params.set('tenantId',instance.tenantId); params.set('role','all'); params.set('status','true')
+      const result = await store.listAdminUsers(params,{memberCandidates:true})
+      return sendJson(res,200,{...result,users:result.users.map(publicUser)})
+    } catch(error) { return sendJson(res,400,{error:error.message}) }
   }
   const instanceMembers = path.match(/^\/api\/admin\/instances\/([^/]+)\/members$/)
   if (instanceMembers && req.method === 'GET') {
@@ -981,6 +998,7 @@ async function api(req, res, path) {
     if (deletingSpaces.has(instance.id)) return sendJson(res, 409, { error: '空间删除正在进行，请稍候' })
     deletingSpaces.add(instance.id)
     try {
+      await requireDeletePermissions(k8sRequest, NAMESPACE, [['apps','deployments'],['','services'],['','secrets'],['','configmaps']])
       await store.beginSpaceDeletion(instance.id)
       await audit({ actorUserId: user.id, action: 'space_delete_requested', targetInstanceId: instance.id, details: { name: instance.name, deleteData: false, ip: clientIp(req) } })
       await mcpSyncQueues.get(instance.id)?.catch(() => {})
@@ -1225,6 +1243,15 @@ setTimeout(async () => {
   }
 }, 3_000 + Math.floor(Math.random() * 2_000)).unref()
 
+const modelSyncReconciler = createModelSyncReconciler({
+  list: store.listPendingModelSyncInstances, apply: applySpaceModels,
+  isQueued: id => modelSyncQueues.has(id), log: message => console.error(message),
+})
+const modelSyncTimer = setInterval(() => {
+  void modelSyncReconciler.tick().catch(() => console.error('模型自动同步扫描失败，下轮重试'))
+}, 15_000)
+modelSyncTimer.unref()
+
 setInterval(async () => {
   try {
     for (const instance of await store.claimIdleInstances()) await scaleInstance(instance, 0)
@@ -1233,6 +1260,8 @@ setInterval(async () => {
 
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   apiRunWorker.stop()
+  clearInterval(modelSyncTimer)
+  modelSyncReconciler.stop()
   server.close(async () => { await store.close(); process.exit(0) })
   setTimeout(() => process.exit(1), 10_000).unref()
 })

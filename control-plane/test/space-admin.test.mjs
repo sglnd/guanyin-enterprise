@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { spaceListOptions, userListOptions, removeSpaceResources } from '../space-admin.mjs'
+import { spaceListOptions, userListOptions, removeSpaceResources, requireDeletePermissions } from '../space-admin.mjs'
 
 test('pagination validates boundaries, status, role and tenant filters', () => {
   assert.equal(spaceListOptions(new URLSearchParams()).pageSize, 20)
@@ -26,4 +26,19 @@ test('resource deletion is retryable after partial cleanup and rejects real API 
   await removeSpaceResources({ slug: 'test' }, { namespace: 'test', request: async () => { throw Object.assign(new Error('missing'), { statusCode: 404 }) } })
   await assert.rejects(removeSpaceResources({ slug: 'test' }, { namespace: 'test', request: async () => { throw Object.assign(new Error('forbidden'), { statusCode: 403 }) } }), /forbidden/)
   await assert.rejects(removeSpaceResources({ slug: 'test' }, { namespace: 'test', delay: async () => {}, request: async () => ({}) }), /仍在删除中/)
+})
+
+test('delete authorization fails before cleanup and never requests PVC deletion', async () => {
+  const calls=[]
+  const request=async(method,path,body)=>{
+    calls.push(body.spec.resourceAttributes)
+    assert.equal(method,'POST')
+    assert.match(path,/selfsubjectaccessreviews$/)
+    return {status:{allowed:body.spec.resourceAttributes.resource!=='secrets'}}
+  }
+  await assert.rejects(requireDeletePermissions(request,'instances',[['apps','deployments'],['','secrets']]),/secrets.*删除权限/)
+  assert.deepEqual(calls.map(c=>c.resource),['deployments','secrets'])
+  assert.ok(calls.every(c=>c.verb==='delete'&&c.namespace==='instances'))
+  await requireDeletePermissions(async()=>({status:{allowed:true}}),'instances',[['apps','deployments']])
+  await assert.rejects(requireDeletePermissions(async()=>({}),'instances',[['','secrets']]),/删除权限/)
 })

@@ -67,3 +67,9 @@
 #space-model-sync-status { margin-top: 16px; padding: 12px; background: var(--bronze-soft); color: var(--bronze); font-size: 12px; }
 .row-actions .model-delete { color: #a22b25; }
 @media(max-width:520px) { .space-model-section { flex-direction: column; align-items: flex-start; } }
+
+.member-candidate-search { display: grid; gap: 8px; margin: 16px 0 12px; }
+.member-candidate-search label { font-size: 13px; color: var(--muted); }
+.member-candidate-pager { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.member-candidate-pager button { width: auto; flex: 0 0 auto; white-space: nowrap; }
+#member-user-page, #member-user-message { font-size: 12px; color: var(--muted); line-height: 1.7; }
