@@ -1,3 +1,5 @@
+import { queryAuditLogs, pruneAuditLogs } from './audit-log.mjs'
+import { initializeUsage, ingestUsage, queryUsage, pruneUsage } from './usage.mjs'
 import { createHash } from 'node:crypto'
 import pg from 'pg'
 import { spaceListOptions, userListOptions } from './space-admin.mjs'
@@ -177,6 +179,7 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
     CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
     CREATE INDEX IF NOT EXISTS audit_logs_created_idx ON audit_logs(created_at DESC);
     CREATE INDEX IF NOT EXISTS audit_logs_target_user_created_idx ON audit_logs(target_user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS audit_logs_instance_created_idx ON audit_logs(target_instance_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS audit_logs_actor_created_idx ON audit_logs(actor_user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS api_definitions_instance_status_idx ON api_definitions(instance_id,status);
     CREATE INDEX IF NOT EXISTS api_runs_status_queued_idx ON api_runs(status,queued_at);
@@ -190,6 +193,7 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
     await client.query('DELETE FROM sessions WHERE expires_at < now()')
     await client.query('COMMIT')
   } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
+  await initializeUsage(pool)
 }
 
 export async function userByUsername(username) {
@@ -240,25 +244,8 @@ export async function createAuditLog({ id, actorUserId, action, targetInstanceId
     VALUES($1,$2,$3,$4,$5,$6)`, [id, actorUserId, action, targetInstanceId || null, targetUserId || null, details])
 }
 
-export async function listAuditLogs({ limit = 50, offset = 0, userId } = {}) {
-  const pageSize = Math.min(Math.max(Number(limit) || 50, 1), 100)
-  const pageOffset = Math.max(Number(offset) || 0, 0)
-  const where = userId ? 'WHERE a.actor_user_id=$1 OR a.target_user_id=$1' : ''
-  const params = userId ? [userId, pageSize, pageOffset] : [pageSize, pageOffset]
-  const limitParam = userId ? '$2' : '$1'; const offsetParam = userId ? '$3' : '$2'
-  const [rows, count] = await Promise.all([
-    pool.query(`SELECT a.id,a.action,a.details,a.created_at AS "createdAt",
-    a.actor_user_id AS "actorUserId", a.target_user_id AS "targetUserId",
-    actor.display_name AS "actor", target.display_name AS "targetUser",
-    i.name AS "targetInstance", i.id AS "targetInstanceId"
-    FROM audit_logs a JOIN users actor ON actor.id=a.actor_user_id
-    LEFT JOIN users target ON target.id=a.target_user_id
-    LEFT JOIN instances i ON i.id=a.target_instance_id
-    ${where} ORDER BY a.created_at DESC LIMIT ${limitParam} OFFSET ${offsetParam}`, params),
-    pool.query(`SELECT count(*)::int AS total FROM audit_logs a ${where}`, userId ? [userId] : []),
-  ])
-  return { logs: rows.rows, total: count.rows[0].total, limit: pageSize, offset: pageOffset }
-}
+export const listAuditLogs = options => queryAuditLogs(pool, options)
+export const purgeAuditLogs = () => pruneAuditLogs(pool)
 
 export async function grantAdminAccess(token, instanceId, expiresAt) {
   await pool.query(`INSERT INTO admin_access_grants(session_token_hash,instance_id,expires_at)
@@ -895,3 +882,7 @@ export async function listPendingModelSyncInstances() {
     WHERE i.deleted_at IS NULL AND i.status<>'deleting' AND c.revision>0
       AND c.sync_status IN ('pending','error') ORDER BY i.created_at`)).rows
 }
+
+export const recordModelUsage = (instance, events) => ingestUsage(pool, instance, events)
+export const modelUsage = params => queryUsage(pool, params)
+export const purgeModelUsage = () => pruneUsage(pool)

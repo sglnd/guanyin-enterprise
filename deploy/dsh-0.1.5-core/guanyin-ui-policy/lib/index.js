@@ -1,3 +1,5 @@
-export const inject = []
+import { installUsage } from './usage.js'
 
-export function apply() {}
+export const inject = ['llm', 'sessions']
+
+export function apply(ctx) { installUsage(ctx) }

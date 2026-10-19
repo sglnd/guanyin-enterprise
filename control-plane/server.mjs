@@ -17,8 +17,8 @@ import { inspectLicense, normalizeCustomerName, publicLicenseStatus } from './li
 const PORT = Number(process.env.PORT || 8080)
 const PUBLIC_DIR = process.env.PUBLIC_DIR || '/app/public'
 const NAMESPACE = process.env.DSH_NAMESPACE || 'guanyin-enterprise-instances'
-const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.5-arm64'
-const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2-gy.ent.5'
+const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.7-arm64'
+const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2-gy.ent.7'
 const DSH_IMAGE_PULL_POLICY = process.env.DSH_IMAGE_PULL_POLICY || 'IfNotPresent'
 const DSH_STORAGE_CLASS = process.env.DSH_STORAGE_CLASS || ''
 const pvcSize = (name, fallback = '2Gi') => {
@@ -444,6 +444,7 @@ async function provision(instance) {
       securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, fsGroupChangePolicy: 'OnRootMismatch', seccompProfile: { type: 'RuntimeDefault' } },
       containers: [{ name: 'dsh', image: DSH_IMAGE, imagePullPolicy: DSH_IMAGE_PULL_POLICY, ports: [{ containerPort: 3080 }],
         env: [
+          { name: 'GUANYIN_USAGE_URL', value: `http://guanyin-control-plane.guanyin-enterprise-system.svc.cluster.local:18080/internal/usage/${instance.id}` },
           { name: 'DSH_HOME', value: '/data/dsh' }, { name: 'BANKOPS_WEB_PROXY', value: '1' },
           { name: 'DSH_BROWSER_AUTH_MODE', value: 'trusted-host' }, { name: 'DSH_TRUSTED_HOSTS', value: PUBLIC_HOSTS },
           { name: 'DSH_PERMISSION_MODE', value: DSH_PERMISSION_MODE },
@@ -877,6 +878,10 @@ async function api(req, res, path) {
     return sendJson(res, 200, { bindings: await store.listSpaceMcpBindings(instance.id), revision })
   }
   if (user.role !== 'platform_admin') return sendJson(res, 403, { error: '需要平台管理员权限' })
+  if (path === '/api/admin/usage' && req.method === 'GET') {
+    try { return sendJson(res, 200, await store.modelUsage(new URL(req.url, 'http://localhost').searchParams)) }
+    catch (error) { return sendJson(res, 400, { error: error.message }) }
+  }
   if(path==='/api/admin/model-providers/test-connection' && req.method==='POST') {
     const input=await bodyJson(req)
     let value
@@ -1022,7 +1027,8 @@ async function api(req, res, path) {
   }
   if (path === '/api/admin/audit-logs' && req.method === 'GET') {
     const url = new URL(req.url, 'http://localhost')
-    return sendJson(res, 200, await store.listAuditLogs({ limit: url.searchParams.get('limit'), offset: url.searchParams.get('offset') }))
+    try { return sendJson(res, 200, await store.listAuditLogs({ limit: url.searchParams.get('limit'), offset: url.searchParams.get('offset'), user: url.searchParams.get('user') || '', space: url.searchParams.get('space') || '' })) }
+    catch (error) { return sendJson(res, 400, { error: error.message }) }
   }
   const userAudit = path.match(/^\/api\/admin\/users\/([^/]+)\/audit-logs$/)
   if (userAudit && req.method === 'GET') {
@@ -1183,6 +1189,16 @@ const server = http.createServer(async (req, res) => {
     if (!license.valid) return path === '/api' || path.startsWith('/api/') || path.startsWith('/openapi/') || path.startsWith('/internal/')
       ? sendJson(res, 403, { error: license.message, code: license.code })
       : redirect(res, '/login')
+    const usageIngest = path.match(/^\/internal\/usage\/([0-9a-f-]{36})$/)
+    if (usageIngest) {
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' })
+      const instance = await store.instanceById(usageIngest[1])
+      if (!instance) return sendJson(res, 404, { error: 'Not found' })
+      const expected = await instanceExtensionToken(instance)
+      if (!sameSecret(String(req.headers['x-guanyin-token'] || ''), expected)) return sendJson(res, 403, { error: 'Forbidden' })
+      try { return sendJson(res, 200, { ok: true, accepted: await store.recordModelUsage(instance, (await bodyJson(req)).events) }) }
+      catch (error) { return sendJson(res, 400, { error: error.message }) }
+    }
     if (path === '/internal/mcp/api-builder') return await apiBuilderMcp(req, res)
     if (path.startsWith('/openapi/v1/')) return await openApi(req, res, path)
     // DSH owns /api as its RPC carrier.  The control plane owns only its
@@ -1247,6 +1263,13 @@ const modelSyncReconciler = createModelSyncReconciler({
   list: store.listPendingModelSyncInstances, apply: applySpaceModels,
   isQueued: id => modelSyncQueues.has(id), log: message => console.error(message),
 })
+const purgeExpiredLogs = () => Promise.all([
+  store.purgeModelUsage().catch(() => console.error('用量保留期清理失败')),
+  store.purgeAuditLogs().catch(() => console.error('审计日志保留期清理失败')),
+])
+void purgeExpiredLogs()
+const usageRetentionTimer = setInterval(() => { void purgeExpiredLogs() }, 3_600_000)
+usageRetentionTimer.unref()
 const modelSyncTimer = setInterval(() => {
   void modelSyncReconciler.tick().catch(() => console.error('模型自动同步扫描失败，下轮重试'))
 }, 15_000)
@@ -1260,6 +1283,7 @@ setInterval(async () => {
 
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => {
   apiRunWorker.stop()
+  clearInterval(usageRetentionTimer)
   clearInterval(modelSyncTimer)
   modelSyncReconciler.stop()
   server.close(async () => { await store.close(); process.exit(0) })

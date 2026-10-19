@@ -6,7 +6,7 @@
   <title>观因 · 智能工作空间</title>
   <link rel="icon" type="image/png" href="/guanyin-logo.png">
   <link rel="apple-touch-icon" href="/guanyin-logo.png">
-  <link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/app-overrides.css"><link rel="stylesheet" href="/lifecycle.css">
+  <link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/app-overrides.css"><link rel="stylesheet" href="/app-usage.css"><link rel="stylesheet" href="/lifecycle.css">
 </head>
 <body>
   <main id="login" class="login-shell hidden">
@@ -45,6 +45,7 @@
       </nav>
       <div class="nav-section-label nav-section-bottom">治理</div>
       <button class="nav admin-only" data-view="audit"><span class="nav-icon">◉</span><span>审计与合规</span></button>
+      <button class="nav admin-only" data-view="usage"><span class="nav-icon">▥</span><span>用量统计</span><em>管理员</em></button>
       <div class="user-block"><div class="avatar" id="avatar"></div><div><strong id="display-name"></strong><small id="tenant-name"></small></div><button id="logout" class="icon-button" title="退出登录" aria-label="退出登录">↗</button></div>
     </aside>
     <section class="content-shell">
@@ -68,8 +69,15 @@
           <div class="pager"><label class="page-size"><span>每页</span> <select id="admin-instance-page-size"><option value="20" selected>20 条</option><option value="50">50 条</option><option value="100">100 条</option></select></label><button id="admin-instance-prev" class="secondary">上一页</button><span id="admin-instance-page" aria-live="polite"></span><button id="admin-instance-next" class="secondary">下一页</button></div>
         </section>
         <section id="audit-view" class="view hidden">
-          <div class="page-head"><div><span class="eyebrow">AUDIT & COMPLIANCE</span><h1>审计与合规</h1><p>集中查看身份、权限和空间生命周期操作记录，不保存对话正文或密钥。</p></div><button id="audit-refresh" class="secondary">↻ 刷新日志</button></div>
+          <div class="page-head"><div><span class="eyebrow">AUDIT & COMPLIANCE</span><h1>审计与合规</h1><p>集中查看身份、权限和空间生命周期操作记录。日志仅保留最近一年，不保存对话正文或密钥。</p></div><button id="audit-refresh" class="secondary">↻ 刷新日志</button></div>
+          <form id="audit-filter" class="audit-filters"><label>用户<input name="user" type="search" maxlength="200" placeholder="姓名、账号或完整用户 ID"></label><label>空间<input name="space" type="search" maxlength="200" placeholder="空间名称或完整空间 ID"></label><button type="submit" class="primary">查询</button><button type="reset" class="secondary">重置</button></form><p class="audit-filter-message">用户筛选包含操作人与被操作用户；多个条件同时满足。</p>
           <div class="card table-card audit-card"><div class="card-head"><div><span class="eyebrow">PLATFORM AUDIT LOG</span><h3>平台审计日志</h3><p>按时间倒序展示管理员与用户的关键操作。</p></div><label class="page-size"><span>每页</span><select id="admin-audit-page-size"><option value="10">10 条</option><option value="20" selected>20 条</option><option value="50">50 条</option><option value="100">100 条</option></select></label></div><div id="audit-table"></div><div class="pager"><button id="admin-audit-prev" class="secondary">上一页</button><span id="admin-audit-page"></span><button id="admin-audit-next" class="secondary">下一页</button></div></div>
+        </section>
+        <section id="usage-view" class="view hidden">
+          <div class="page-head"><div><span class="eyebrow">MODEL USAGE</span><h1>用量统计</h1><p>查看最近一年的模型调用、Token 消耗、缓存和耗时。仅平台管理员可访问。</p></div><div class="page-actions"><button id="usage-export" class="secondary" disabled>↓ 导出当前页</button><button id="usage-refresh" class="secondary">↻ 刷新</button></div></div>
+          <form id="usage-filter" class="usage-filters"><label>开始日期<input name="from" type="date" required></label><label>结束日期<input name="to" type="date" required></label><label>统计维度<select name="group"><option value="user">用户</option><option value="detail">调用明细</option><option value="model">模型</option><option value="space">空间</option><option value="tenant">租户</option></select></label><label>提供方<input name="provider" placeholder="可选，精确匹配"></label><label>模型<input name="model" placeholder="可选，精确匹配"></label><label>关键词<input name="q" type="search" placeholder="用户、空间、模型或会话"></label><button type="submit" class="primary">查询</button><button type="reset" class="secondary">重置</button></form>
+          <p id="usage-message" class="audit-filter-message" role="status"></p><div id="usage-summary" class="summary-strip"></div>
+          <div class="card table-card"><div class="card-head"><div><span class="eyebrow">USAGE DETAILS</span><h3 id="usage-title">按用户汇总</h3><p>未知用量不按零计算；缓存已包含在输入 Token 中。</p></div><label class="page-size"><span>每页</span><select id="usage-page-size"><option value="20" selected>20 条</option><option value="50">50 条</option><option value="100">100 条</option></select></label></div><div class="usage-scroll"><table class="usage-table"><thead id="usage-head"></thead><tbody id="usage-body"></tbody></table></div><div class="pager"><button id="usage-prev" class="secondary">上一页</button><span id="usage-page"></span><button id="usage-next" class="secondary">下一页</button></div></div>
         </section>
         <section id="models-view" class="view hidden">
           <div class="page-head"><div><span class="eyebrow">MODEL REGISTRY</span><h1>模型管理</h1><p>统一登记模型提供方，将可用模型接入指定空间。</p></div><div class="page-actions"><button id="models-refresh" class="secondary">↻ 刷新</button><button id="model-create" class="primary">＋ 新增提供方</button></div></div>

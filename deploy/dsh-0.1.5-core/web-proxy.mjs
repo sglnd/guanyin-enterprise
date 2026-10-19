@@ -1,6 +1,7 @@
 import http from 'node:http'
 import net from 'node:net'
-import { readFile } from 'node:fs/promises'
+import { readFile, mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { synchronizeModels } from './model-sync.mjs'
 
@@ -196,12 +197,30 @@ const server = http.createServer(async (req, res) => {
       path = `${url.pathname}${url.search}`
   }
 
+  let meteredBody
+  if (req.method === 'POST' && path.split('?')[0] === '/api/session/prompt') {
+    try {
+      const envelope = await readJson(req, 16 * 1024 * 1024)
+      const args = envelope.payload?.args?.request || envelope.payload?.args
+      if (args?.sessionId && args?.requestId) {
+        let actor = null; try { actor = verifyIdentity(req) } catch {}
+        if (actor) {
+          const dir = join(process.env.DSH_HOME || '/data/dsh', 'guanyin-usage', 'actors')
+          await mkdir(dir, { recursive: true })
+          const key = createHash('sha256').update(`${args.sessionId}:${args.requestId}`).digest('hex') + '.json'
+          try { await writeFile(join(dir, key), JSON.stringify({ userId: actor.user.id }), { flag: 'wx', mode: 0o600 }) } catch (error) { if (error.code !== 'EEXIST') throw error }
+        }
+      }
+      meteredBody = JSON.stringify(envelope)
+      delete req.headers['transfer-encoding']
+    } catch { res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: '请求或用量身份记录失败' })); return }
+  }
   const upstream = http.request({
     hostname: upstreamHost,
     port: upstreamPort,
     method: req.method,
     path,
-    headers: req.headers,
+    headers: meteredBody ? { ...req.headers, 'content-length': Buffer.byteLength(meteredBody), 'content-type': 'application/json' } : req.headers,
   }, upstreamRes => {
     const headers = { ...upstreamRes.headers }
     if (bootstrapping) {
@@ -216,7 +235,7 @@ const server = http.createServer(async (req, res) => {
     if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
     res.end(`DSH upstream unavailable: ${error.message}`)
   })
-  req.pipe(upstream)
+  if (meteredBody) upstream.end(meteredBody); else req.pipe(upstream)
 })
 
 server.on('upgrade', async (req, socket, head) => {

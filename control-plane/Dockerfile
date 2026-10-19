@@ -14,6 +14,8 @@ COPY control-plane/dsh-adapter.mjs ./dsh-adapter.mjs
 COPY control-plane/api-runner.mjs ./api-runner.mjs
 COPY control-plane/api-contract.mjs ./api-contract.mjs
 COPY control-plane/api-builder-mcp.mjs ./api-builder-mcp.mjs
+COPY control-plane/audit-log.mjs ./audit-log.mjs
+COPY control-plane/usage.mjs ./usage.mjs
 COPY control-plane/guanyin-identity.mjs ./guanyin-identity.mjs
 COPY control-plane/mcp-sync.mjs ./mcp-sync.mjs
 COPY control-plane/model-registry.mjs ./model-registry.mjs
