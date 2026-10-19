@@ -6,8 +6,8 @@
 
 ## 企业 License
 
-1. 使用内部 `sglnd/guanyin-license-issuer` 生成 Ed25519 密钥对并离线签发客户 License。
-2. 将签发公钥配置到 Kubernetes ConfigMap 的 `licensePublicKey`，私钥不得进入本仓库、镜像或客户集群。
+1. 观因企业版清单固定内置受控签发系统对应的 Ed25519 验签公钥；部署和升级时不得重新生成或替换密钥对。
+2. 内部 `sglnd/guanyin-license-issuer` 使用与该公钥配对的长期私钥离线签发客户 License；私钥不得进入本仓库、镜像或客户集群。
 3. 部署后打开登录页，填写与签发时完全一致的客户名称并粘贴 License。
 4. 校验通过后显示原登录表单；授权配置保存在 PostgreSQL，Pod 重启后仍然有效。
 

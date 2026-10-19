@@ -78,7 +78,7 @@ unset DB_PASSWORD ADMIN_PASSWORD DB_URL
 
 编辑 `kubernetes.yaml`：
 
-1. 将 `licensePublicKey` 替换为内部签发系统生成的 Ed25519 公钥。不要把私钥或客户 License 写入 YAML。
+1. 保留清单中的固定 `licensePublicKey`；它与观因受控签发系统的长期私钥配对。不要重新生成、替换或删除它，也不要把私钥或客户 License 写入 YAML。
 2. 把 `trustedHosts` 改成真实域名，例如 `guanyin.example.com`；多个域名用英文逗号分隔。
 3. 确认 DSH 镜像标签与节点架构一致。
 4. 按存储规划设置 `dshStorageClass` 和三个 DSH PVC 容量参数。配置只影响新建空间；已有 PVC 不会自动调整。
@@ -121,7 +121,7 @@ kubectl auth can-i create deployments.apps \
 
 ## 7. 升级与回滚
 
-升级时先备份数据库，再在三个节点导入新镜像。将控制面更新到 `guanyin/control-plane:0.7.2-enterprise.2-amd64`，并把控制面的 `DSH_IMAGE`、`DSH_VERSION` 更新为企业 DSH `0.1.5-rc.2-gy.ent.5`。这只决定新建空间使用的镜像；已有空间不会自动迁移。执行 `kubectl apply` 前必须把交付清单中的 `licensePublicKey` 占位内容替换为当前集群实际公钥，避免覆盖 ConfigMap 后使已保存 License 失效。
+升级时先备份数据库，再在三个节点导入新镜像。将控制面更新到交付版本，并把控制面的 `DSH_IMAGE`、`DSH_VERSION` 更新为对应企业 DSH 版本。这只决定新建空间使用的镜像；已有空间不会自动迁移。执行 `kubectl apply` 时保留清单中的固定 `licensePublicKey`，否则已签发 License 会失效。
 
 ```bash
 kubectl -n guanyin-enterprise-system create job --from=cronjob/guanyin-postgres-backup guanyin-backup-before-upgrade

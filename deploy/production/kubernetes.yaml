@@ -58,10 +58,10 @@ data:
   dshDataPvcSize: 5Gi
   dshHomePvcSize: 5Gi
   dshWorkspacePvcSize: 20Gi
-  # 使用 guanyin-license-issuer 生成的 Ed25519 公钥；私钥不得进入客户集群。
+  # 观因企业版固定的 Ed25519 验签公钥。仅受控签发系统持有对应私钥。
   licensePublicKey: |
     -----BEGIN PUBLIC KEY-----
-    部署前替换为实际公钥
+    MCowBQYDK2VwAyEA9GJyh5v/OHk5ggjwg6v8hnxzkdnRnuvQkquAtCgjw/c=
     -----END PUBLIC KEY-----
 ---
 apiVersion: v1
