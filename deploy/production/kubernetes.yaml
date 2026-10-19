@@ -163,7 +163,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: control-plane
-          image: guanyin/control-plane:0.7.2-enterprise.3-amd64
+          image: guanyin/control-plane:0.7.2-enterprise.4-amd64
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080

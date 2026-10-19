@@ -177,7 +177,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: control-plane
-          image: guanyin/control-plane:0.7.2-enterprise.3
+          image: guanyin/control-plane:0.7.2-enterprise.4
           imagePullPolicy: Never
           ports:
             - containerPort: 8080

@@ -55,11 +55,11 @@ docs/                生产就绪与运维文档
 
 ## 本地构建与部署
 
-当前本机示例使用企业版控制面 `0.7.2-enterprise.3` 和 ARM64 工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.7-arm64`。
+当前本机示例使用企业版控制面 `0.7.2-enterprise.4` 和 ARM64 工作空间镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.7-arm64`。
 
 ```bash
-docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.7.2-enterprise.3 .
-docker save guanyin/control-plane:0.7.2-enterprise.3 |
+docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.7.2-enterprise.4 .
+docker save guanyin/control-plane:0.7.2-enterprise.4 |
   docker exec -i desktop-control-plane ctr -n k8s.io images import -
 docker save bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.7-arm64 |
   docker exec -i desktop-control-plane ctr -n k8s.io images import -
