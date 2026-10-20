@@ -9,6 +9,7 @@ test('model registration normalizes endpoint and model IDs and validates DSH fie
   assert.equal(result.config.models[0].id,'model-1')
   assert.equal(result.config.models[0].reasoningEfforts.off,null)
   assert.equal(modelCredentialRef('ab-cd'),'GUANYIN_MODEL_AB_CD')
+  assert.equal(modelProviderInput({...input,apiKey:''}).config.authMode,'none')
   for(const patch of [{code:'__proto__'},{baseURL:'http://user:password@example.test'},{models:[{id:'same'},{id:'same'}]},{models:[{id:'test',reasoningEfforts:{low:null}}]},{streamIdleTimeoutMs:0},{compat:{apiKey:'leak'}}])assert.throws(()=>modelProviderInput({...input,...patch}))
 })
 function fixture(){
@@ -23,6 +24,15 @@ test('model sync writes one-way credentials and only mutates managed provider pa
  assert.equal(ops[1].value.apiKeyEnv,'GUANYIN_MODEL_BB');assert.equal(JSON.stringify(ops).includes('private'),false)
  assert.ok(f.calls.some(([m,a])=>m==='credentials/unset'&&a.ref==='GUANYIN_MODEL_AA'))
  assert.ok(f.calls.some(([m])=>m==='settings/update'))
+})
+test('unauthenticated model sync omits API key references and clears an old managed credential',async()=>{
+ const f=fixture(),config=modelProviderInput({...input,apiKey:''}).config
+ await synchronizeModels({providers:[{id:'guanyin-deepseek-flash',authMode:'none',config}],defaultModel:{provider:'guanyin-deepseek-flash',model:'model-1'}},f.rpc)
+ const ops=f.calls.find(([m,a])=>m==='settings/mutate'&&a.ns==='llm-pi-ai')[1].ops
+ const provider=ops.find(op=>op.path[1]==='guanyin-deepseek-flash').value
+ assert.equal(provider.apiKeyEnv,undefined)
+ assert.ok(f.calls.some(([m,a])=>m==='credentials/unset'&&a.ref==='GUANYIN_MODEL_AA'))
+ assert.equal(f.calls.some(([m])=>m==='credentials/set'),false)
 })
 test('detaching all managed models preserves local default and removes stale credentials',async()=>{
  const f=fixture();await synchronizeModels({providers:[]},f.rpc)
@@ -65,6 +75,17 @@ test('connection test sends minimal protocol requests and never returns secrets 
  assert.equal((await testModelConnection(value,'private',async()=>{throw Error('private')})).ok,false)
 })
 
+test('unauthenticated connection test sends no authorization header',async()=>{
+ const {testModelConnection}=await import('../model-registry.mjs')
+ const value=modelProviderInput({...input,apiKey:''})
+ const result=await testModelConnection(value,undefined,async(url,options)=>{
+   assert.equal(options.headers.authorization,undefined)
+   assert.equal(options.headers['x-api-key'],undefined)
+   return Response.json({choices:[{message:{content:'OK'}}]})
+ })
+ assert.equal(result.ok,true)
+})
+
 test('gateway route UUID is independent of request model and full endpoints normalize once',async()=>{
  const {testModelConnection}=await import('../model-registry.mjs')
  for (const [api,suffix,response] of [['openai-completions','/chat/completions',{choices:[{message:{content:'OK'}}]}],['openai-responses','/responses',{object:'response',output:[]}],['anthropic-messages','/messages',{type:'message',content:[]}]]) {
@@ -92,7 +113,7 @@ test('editing providers retains custom upstream IDs and multi-model identities',
  const open=source.slice(source.indexOf('function openModelProvider('),source.indexOf("\n$('#model-provider-form').onsubmit"))
  for(const models of [[{id:'glm-5',name:'GLM',reasoningEfforts:false}],[{id:'a',name:'A'},{id:'b',name:'B'}]]){
    const provider={id:'test',code:'glm-route',name:'GLM',enabled:true,config:{api:'openai-completions',baseURL:'http://gateway.test/v1',models}}
-   const form={reset(){},dataset:{},elements:Object.fromEntries(['code','name','apiKey','api','baseURL','streamIdleTimeoutMs','models','requestModel','compat','enabled'].map(k=>[k,{}])),querySelector:()=>({})}
+   const form={reset(){},dataset:{},elements:Object.fromEntries(['code','name','apiKey','authMode','api','baseURL','streamIdleTimeoutMs','models','requestModel','compat','enabled'].map(k=>[k,{}])),querySelector:()=>({})}
    const nodes={'#model-provider-form':form,'#model-provider-title':{},'#model-provider-dialog':{showModal(){}}}
    runInNewContext(open+';openModelProvider("test")',{me:{role:'platform_admin'},modelProviders:[provider],$:s=>nodes[s]})
    const value=modelProviderInput({code:provider.code,name:provider.name,api:provider.config.api,baseURL:provider.config.baseURL,models:form.elements.models.value,requestModel:form.elements.requestModel.value})

@@ -48,22 +48,26 @@ export function modelProviderInput(input) {
   for (const [key,value] of Object.entries(compat)) if (['maxTokensField','thinkingFormat'].includes(key) ? typeof value !== 'string' || !value : typeof value !== 'boolean') throw new Error('compat 字段类型无效')
   const apiKey = input.apiKey === undefined || input.apiKey === '' ? undefined : String(input.apiKey).trim()
   if (apiKey !== undefined && (!apiKey || apiKey.length > 16384)) throw new Error('API Key 无效')
-  return { code, name, config: { api, baseURL: url.href.replace(/\/$/, ''), streamIdleTimeoutMs: timeout, compat, models }, enabled: input.enabled === undefined || input.enabled === true || input.enabled === 'true', apiKey }
+  const authMode = String(input.authMode || (apiKey ? 'api-key' : 'none')).trim()
+  if (!['api-key','none'].includes(authMode)) throw new Error('认证方式无效')
+  if (authMode === 'none' && apiKey) throw new Error('无需认证的模型不能填写 API Key')
+  return { code, name, config: { api, baseURL: url.href.replace(/\/$/, ''), streamIdleTimeoutMs: timeout, compat, models, authMode }, enabled: input.enabled === undefined || input.enabled === true || input.enabled === 'true', apiKey }
 }
 export const managedProviderId = code => `guanyin-${code}`
 export const modelCredentialRef = id => `GUANYIN_MODEL_${id.replaceAll('-', '_').toUpperCase()}`
 
 // A small real inference request; never expose gateway bodies or credentials.
 export async function testModelConnection(value, apiKey, fetcher = fetch) {
-  if (!apiKey) throw new Error('请填写 API Key，或先保存提供方密钥')
+  const authenticated = value.config.authMode !== 'none'
+  if (authenticated && !apiKey) throw new Error('请填写 API Key，或先保存提供方密钥')
   const {config} = value, model = config.models[0].id
   const headers = {'content-type':'application/json'}
   let path, body
   if (config.api === 'anthropic-messages') {
-    path='/messages'; headers['x-api-key']=apiKey; headers['anthropic-version']='2023-06-01'
+    path='/messages'; if (authenticated) headers['x-api-key']=apiKey; headers['anthropic-version']='2023-06-01'
     body={model,max_tokens:16,messages:[{role:'user',content:'Reply OK.'}]}
   } else {
-    headers.authorization=`Bearer ${apiKey}`
+    if (authenticated) headers.authorization=`Bearer ${apiKey}`
     if(config.api==='openai-responses') {path='/responses';body={model,input:'Reply OK.',max_output_tokens:16,stream:false}}
     else {path='/chat/completions';body={model,messages:[{role:'user',content:'Reply OK.'}],stream:false,[config.compat.maxTokensField||'max_tokens']:16}}
   }

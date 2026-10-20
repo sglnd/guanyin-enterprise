@@ -287,10 +287,15 @@ function applySpaceModels(instance) {
       for(const id of config.providerIds){
         const provider=await store.modelProviderById(id)
         if(!provider?.enabled)continue
+        const {authMode='api-key',...providerConfig}=provider.config
+        if(authMode==='none') {
+          providers.push({id:managedProviderId(provider.code),authMode:'none',config:{...providerConfig,displayName:provider.name}})
+          continue
+        }
         const secret=await k8sRequest('GET',`/api/v1/namespaces/${NAMESPACE}/secrets/guanyin-model-${provider.id}`)
         const apiKey=Buffer.from(secret.data?.apiKey||'','base64').toString('utf8')
         if(!apiKey)throw new Error('模型凭证未配置')
-        providers.push({id:managedProviderId(provider.code),credentialRef:modelCredentialRef(provider.id),apiKey,config:{...provider.config,displayName:provider.name}})
+        providers.push({id:managedProviderId(provider.code),credentialRef:modelCredentialRef(provider.id),apiKey,config:{...providerConfig,displayName:provider.name}})
       }
       const defaultProvider=providers.find(p=>p.credentialRef===modelCredentialRef(config.defaultProviderId||''))
       const token=await instanceExtensionToken(instance)
@@ -887,12 +892,12 @@ async function api(req, res, path) {
     let value
     try{value=modelProviderInput(input)}catch(error){return sendJson(res,400,{error:error.message})}
     let apiKey=value.apiKey
-    if(!apiKey&&input.providerId){
+    if(value.config.authMode!=='none'&&!apiKey&&input.providerId){
       const existing=await store.modelProviderById(input.providerId)
       if(!existing)return sendJson(res,404,{error:'模型提供方不存在'})
       try{const secret=await k8sRequest('GET',`/api/v1/namespaces/${NAMESPACE}/secrets/guanyin-model-${existing.id}`);apiKey=Buffer.from(secret.data?.apiKey||'','base64').toString('utf8')}catch{return sendJson(res,400,{error:'无法读取已保存密钥，请重新填写或检查 Secret 权限'})}
     }
-    if(!apiKey)return sendJson(res,400,{error:'请填写 API Key'})
+    if(value.config.authMode!=='none'&&!apiKey)return sendJson(res,400,{error:'请填写 API Key'})
     return sendJson(res,200,await testModelConnection(value,apiKey))
   }
   if (path === '/api/admin/model-providers' && req.method === 'GET') return sendJson(res,200,{providers:await store.listModelProviders()})
@@ -904,14 +909,15 @@ async function api(req, res, path) {
     const existing=modelProvider?await store.modelProviderById(modelProvider[1]):null
     if(modelProvider&&!existing)return sendJson(res,404,{error:'模型提供方不存在'})
     if(existing&&existing.code!==value.code)return sendJson(res,400,{error:'提供方编码创建后不可修改'})
-    if(!existing&&!value.apiKey)return sendJson(res,400,{error:'新增提供方需填写 API Key'})
+    if(!existing&&value.config.authMode==='api-key'&&!value.apiKey)return sendJson(res,400,{error:'使用 API Key 认证时需填写 API Key'})
     const id=existing?.id||randomUUID(),name=`guanyin-model-${id}`
     try {
       if(!existing)await store.saveModelProvider(id,value,user.id)
-      if(value.apiKey)await upsertResource('Secret',name,{apiVersion:'v1',kind:'Secret',metadata:{name,labels:{'guanyin.io/config':'model','guanyin.io/provider':id}},stringData:{apiKey:value.apiKey}})
+      if(value.config.authMode==='none')await k8sRequest('DELETE',`/api/v1/namespaces/${NAMESPACE}/secrets/${name}`).catch(error=>{if(error.statusCode!==404)throw error})
+      else if(value.apiKey)await upsertResource('Secret',name,{apiVersion:'v1',kind:'Secret',metadata:{name,labels:{'guanyin.io/config':'model','guanyin.io/provider':id}},stringData:{apiKey:value.apiKey}})
       if(existing)await store.saveModelProvider(id,value,user.id)
       const sync=await synchronizeProviderSpaces(id)
-      await audit({actorUserId:user.id,action:existing?'model_provider_update':'model_provider_create',details:{providerId:id,code:value.code,keyChanged:Boolean(value.apiKey),ip:clientIp(req)}})
+      await audit({actorUserId:user.id,action:existing?'model_provider_update':'model_provider_create',details:{providerId:id,code:value.code,authMode:value.config.authMode,keyChanged:Boolean(value.apiKey),ip:clientIp(req)}})
       return sendJson(res,existing?200:201,{provider:await store.modelProviderById(id),sync})
     }catch(error){
       if(!existing){await store.deleteModelProvider(id,value.name).catch(()=>{});await k8sRequest('DELETE',`/api/v1/namespaces/${NAMESPACE}/secrets/${name}`).catch(()=>{})}
