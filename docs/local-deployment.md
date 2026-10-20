@@ -1,6 +1,6 @@
 # 观因本地部署与功能边界
 
-企业版聚焦完整主流程：平台管理员创建租户和用户、给用户分配固定版本的 DSH 实例、用户登录后进入自己的实例。本机 ARM 环境的新空间默认使用镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.7-arm64`，包含观因企业品牌、License、短期登录身份与平台模型下发；现有空间保持其创建时锁定的镜像版本，升级时需单独切换镜像。
+企业版聚焦完整主流程：平台管理员创建租户和用户、给用户分配固定版本的 DSH 实例、用户登录后进入自己的实例。本机 ARM 环境的新空间默认使用镜像 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.8-arm64`，包含观因企业品牌、License、短期登录身份与平台模型下发；现有空间保持其创建时锁定的镜像版本，升级时需单独切换镜像。
 
 该核心镜像包含 `dsh-better-sidebar 0.18.0`，不包含 Univer Office 和 Browser Use 插件，不开放 Univer 的 `9081` 端口；文档读取使用镜像内的 Python 文档解析运行时。
 
@@ -21,7 +21,7 @@
 ```bash
 docker build -f control-plane/Dockerfile -t guanyin/control-plane:0.7.2-enterprise.3 .
 docker save guanyin/control-plane:0.7.2-enterprise.3 | docker exec -i desktop-control-plane ctr -n k8s.io images import -
-docker save bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.7-arm64 | docker exec -i desktop-control-plane ctr -n k8s.io images import -
+docker save bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.8-arm64 | docker exec -i desktop-control-plane ctr -n k8s.io images import -
 kubectl apply -f deploy/kubernetes.yaml
 kubectl -n guanyin-enterprise-system rollout status statefulset/guanyin-enterprise-postgres
 kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-enterprise-control-plane
@@ -39,10 +39,10 @@ Docker Desktop Kubernetes 使用独立的 containerd 镜像仓库，本机 Docke
 
 ## 2026-10-10 本地 DSH 更新
 
-本地测试版本为 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.7-arm64`，配置档为 `guanyin-enterprise-v7`。可从已构建的企业版 ent.4 运行时增量构建：
+本地测试版本为 `bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.8-arm64`，配置档为 `guanyin-enterprise-v8`。可从已构建的企业版 ent.4 运行时增量构建：
 
 ```bash
-docker build --platform linux/arm64 -f deploy/dsh-0.1.5-core/Dockerfile.update -t bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.7-arm64 .
+docker build --platform linux/arm64 -f deploy/dsh-0.1.5-core/Dockerfile.update -t bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.8-arm64 .
 ```
 
 该更新包含模型用量采集、模型同步接口、设置客户端修复、主题自适应观因 Logo，并将加载与分析文案保持为观因品牌；继续保留企业版的 DeepSeek 官方入口与网页搜索隐藏策略。原生文件预览和 better-sidebar 保留。受管企业版 v1/v2/v3/v4/v5/v6 配置档启动时升级为 v7；会话与工作目录不删除。非受管旧配置档仍需单独迁移，不会强行覆盖。
