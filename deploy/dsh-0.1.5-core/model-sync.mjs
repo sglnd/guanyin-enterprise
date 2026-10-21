@@ -22,7 +22,12 @@ export async function synchronizeModels(payload, rpc) {
     if (item.authMode === 'none') {
       const previousRef = previous[item.id]?.apiKeyEnv
       if (/^GUANYIN_MODEL_[A-F0-9_]+$/.test(previousRef || '')) await rpc('credentials/unset', {ref:previousRef})
-      ops.push({ op: 'set', path: ['providers', item.id], value: { ...item.config } })
+      // Local gateways commonly close a valid OpenAI-compatible SSE stream without a terminal finish_reason.
+      // Enable pi-ai's built-in tolerance only for unauthenticated, platform-managed completions routes;
+      // an explicit compat value always wins, so strict validation remains selectable.
+      const compat = { ...(item.config.compat || {}) }
+      if (item.config.api === 'openai-completions' && compat.supportsFinishReason === undefined) compat.supportsFinishReason = false
+      ops.push({ op: 'set', path: ['providers', item.id], value: { ...item.config, compat } })
     } else {
       await rpc('credentials/set', {ref:item.credentialRef,value:item.apiKey})
       ops.push({ op: 'set', path: ['providers', item.id], value: { ...item.config, apiKeyEnv: item.credentialRef } })

@@ -10,6 +10,8 @@ test('model registration normalizes endpoint and model IDs and validates DSH fie
   assert.equal(result.config.models[0].reasoningEfforts.off,null)
   assert.equal(modelCredentialRef('ab-cd'),'GUANYIN_MODEL_AB_CD')
   assert.equal(modelProviderInput({...input,apiKey:''}).config.authMode,'none')
+  assert.equal(modelProviderInput({...input,tolerateMissingFinishReason:true}).config.compat.supportsFinishReason,false)
+  assert.equal(modelProviderInput({...input,tolerateMissingFinishReason:false}).config.compat.supportsFinishReason,true)
   for(const patch of [{code:'__proto__'},{baseURL:'http://user:password@example.test'},{models:[{id:'same'},{id:'same'}]},{models:[{id:'test',reasoningEfforts:{low:null}}]},{streamIdleTimeoutMs:0},{compat:{apiKey:'leak'}}])assert.throws(()=>modelProviderInput({...input,...patch}))
 })
 function fixture(){
@@ -31,6 +33,7 @@ test('unauthenticated model sync omits API key references and clears an old mana
  const ops=f.calls.find(([m,a])=>m==='settings/mutate'&&a.ns==='llm-pi-ai')[1].ops
  const provider=ops.find(op=>op.path[1]==='guanyin-deepseek-flash').value
  assert.equal(provider.apiKeyEnv,undefined)
+ assert.equal(provider.compat.supportsFinishReason,false)
  assert.ok(f.calls.some(([m,a])=>m==='credentials/unset'&&a.ref==='GUANYIN_MODEL_AA'))
  assert.equal(f.calls.some(([m])=>m==='credentials/set'),false)
 })
@@ -113,7 +116,7 @@ test('editing providers retains custom upstream IDs and multi-model identities',
  const open=source.slice(source.indexOf('function openModelProvider('),source.indexOf("\n$('#model-provider-form').onsubmit"))
  for(const models of [[{id:'glm-5',name:'GLM',reasoningEfforts:false}],[{id:'a',name:'A'},{id:'b',name:'B'}]]){
    const provider={id:'test',code:'glm-route',name:'GLM',enabled:true,config:{api:'openai-completions',baseURL:'http://gateway.test/v1',models}}
-   const form={reset(){},dataset:{},elements:Object.fromEntries(['code','name','apiKey','authMode','api','baseURL','streamIdleTimeoutMs','models','requestModel','compat','enabled'].map(k=>[k,{}])),querySelector:()=>({})}
+   const form={reset(){},dataset:{},elements:Object.fromEntries(['code','name','apiKey','authMode','api','baseURL','streamIdleTimeoutMs','models','requestModel','compat','tolerateMissingFinishReason','enabled'].map(k=>[k,{}])),querySelector:()=>({})}
    const nodes={'#model-provider-form':form,'#model-provider-title':{},'#model-provider-dialog':{showModal(){}}}
    runInNewContext(open+';openModelProvider("test")',{me:{role:'platform_admin'},modelProviders:[provider],$:s=>nodes[s]})
    const value=modelProviderInput({code:provider.code,name:provider.name,api:provider.config.api,baseURL:provider.config.baseURL,models:form.elements.models.value,requestModel:form.elements.requestModel.value})

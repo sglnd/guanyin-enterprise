@@ -42,10 +42,11 @@ export function modelProviderInput(input) {
     if (result.input !== undefined && (!Array.isArray(result.input) || result.input.some(v => !['text','image'].includes(v)))) throw new Error('input 仅支持 text、image')
     return result
   })
-  const compat = jsonObject(input.compat || {}, 'compat')
-  const allowedCompat = new Set(['supportsReasoningEffort','supportsStore','supportsDeveloperRole','supportsUsageInStreaming','maxTokensField','thinkingFormat','requiresToolResultName','requiresAssistantAfterToolResult','requiresThinkingAsText','requiresMistralToolIds'])
+  const compat = { ...jsonObject(input.compat || {}, 'compat') }
+  const allowedCompat = new Set(['supportsReasoningEffort','supportsStore','supportsDeveloperRole','supportsUsageInStreaming','supportsFinishReason','maxTokensField','thinkingFormat','requiresToolResultName','requiresAssistantAfterToolResult','requiresThinkingAsText','requiresMistralToolIds'])
   if (Object.keys(compat).some(k => !allowedCompat.has(k))) throw new Error('compat 包含不支持的字段')
   for (const [key,value] of Object.entries(compat)) if (['maxTokensField','thinkingFormat'].includes(key) ? typeof value !== 'string' || !value : typeof value !== 'boolean') throw new Error('compat 字段类型无效')
+  if (input.tolerateMissingFinishReason !== undefined) compat.supportsFinishReason = !(input.tolerateMissingFinishReason === true || input.tolerateMissingFinishReason === 'true' || input.tolerateMissingFinishReason === 'on')
   const apiKey = input.apiKey === undefined || input.apiKey === '' ? undefined : String(input.apiKey).trim()
   if (apiKey !== undefined && (!apiKey || apiKey.length > 16384)) throw new Error('API Key 无效')
   const authMode = String(input.authMode || (apiKey ? 'api-key' : 'none')).trim()
