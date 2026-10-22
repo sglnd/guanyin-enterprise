@@ -73,3 +73,14 @@
 .member-candidate-pager { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
 .member-candidate-pager button { width: auto; flex: 0 0 auto; white-space: nowrap; }
 #member-user-page, #member-user-message { font-size: 12px; color: var(--muted); line-height: 1.7; }
+
+/* Space management uses the same tab treatment as users and tenants. */
+.space-tabs { overflow-x: auto; flex-wrap: nowrap; margin-bottom: 24px; }
+.space-tabs .space-tab { width: auto; flex: 0 0 auto; font-size: 13px; white-space: nowrap; }
+.space-tabs .space-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.space-panel { min-height: 260px; }
+.space-panel .member-manager { margin-top: 0; }
+.space-panel .subsection-head h3 { font-size: 14px; }
+.space-panel .subsection-head p { line-height: 1.7; }
+.member-candidate-pager button { padding: 7px 12px; font-size: 12px; line-height: 1.5; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); }
+#space-mcp-list small { overflow-wrap: anywhere; }
