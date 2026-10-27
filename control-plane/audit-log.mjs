@@ -1,4 +1,5 @@
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export const shouldRecordAudit = action => action === 'user_login' || action === 'user_chat_input' || action === 'session_delete'
 export function auditLogOptions({limit=50,offset=0,userId,user='',space=''}={}){
  const pageSize=Number(limit||50),pageOffset=Number(offset||0)
  if(!Number.isInteger(pageSize)||pageSize<1||pageSize>100||!Number.isSafeInteger(pageOffset)||pageOffset<0)throw Error('审计日志分页参数无效')
@@ -7,7 +8,7 @@ export function auditLogOptions({limit=50,offset=0,userId,user='',space=''}={}){
  return {limit:pageSize,offset:pageOffset,userId,user:user.trim(),space:space.trim()}
 }
 export async function queryAuditLogs(pool,options={}){
- const q=auditLogOptions(options),values=[],conditions=["a.created_at >= now()-interval '1 year'"]
+ const q=auditLogOptions(options),values=[],conditions=["a.created_at >= now()-interval '1 year'", "a.action IN ('user_login','user_chat_input','session_delete')"]
  const parameter=value=>{values.push(value);return '$'+values.length}
  const literal=value=>'%'+value.replace(/[\\%_]/g,'\\$&')+'%'
  if(q.userId){const p=parameter(q.userId);conditions.push(`(a.actor_user_id=${p} OR a.target_user_id=${p})`)}

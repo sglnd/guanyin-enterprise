@@ -1,0 +1,343 @@
+import http from 'node:http'
+import net from 'node:net'
+import { readFile, mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { synchronizeModels } from './model-sync.mjs'
+
+const upstreamHost = '127.0.0.1'
+const upstreamPort = 3081
+const brandLogoPath = '/opt/dsh-runtime/guanyin-logo.png'
+
+function verifyIdentity(req) {
+  const secret = process.env.DSH_EXT_TOKEN || ''
+  const [headerPart, payloadPart, actualPart, extra] = String(req.headers['x-guanyin-identity'] || '').split('.')
+  if (!secret || !headerPart || !payloadPart || !actualPart || extra) throw new Error('missing identity')
+  const input = `${headerPart}.${payloadPart}`
+  const actual = Buffer.from(actualPart)
+  const expected = Buffer.from(createHmac('sha256', secret).update(input).digest('base64url'))
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error('invalid identity')
+  const header = JSON.parse(Buffer.from(headerPart, 'base64url').toString('utf8'))
+  const claims = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8'))
+  const now = Math.floor(Date.now() / 1000)
+  if (header.alg !== 'HS256' || claims.iss !== 'guanyin-control-plane' || claims.aud !== 'guanyin-dsh' || claims.exp <= now || claims.iat > now + 5) throw new Error('expired identity')
+  return claims
+}
+
+function publicIdentity(claims) {
+  return { user: claims.user, tenant: claims.tenant, space: claims.space, impersonated: Boolean(claims.impersonated) }
+}
+
+async function token() {
+  try { return (await readFile('/tmp/dsh-web-token', 'utf8')).trim() } catch { return '' }
+}
+
+function sessionFingerprint(webToken) {
+  return createHash('sha256').update(webToken).digest('base64url')
+}
+
+function hasCurrentDshSession(req, webToken) {
+  const expected = sessionFingerprint(webToken)
+  const actual = String(req.headers.cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith('guanyin-dsh-session='))?.slice('guanyin-dsh-session='.length)
+  if (!actual) return false
+  const left = Buffer.from(actual)
+  const right = Buffer.from(expected)
+  return left.length === right.length && timingSafeEqual(left, right)
+}
+
+function readJson(req, limit = 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = []; let size = 0
+    req.on('data', chunk => {
+      size += chunk.length
+      if (size > limit) { reject(new Error('request body too large')); req.destroy(); return }
+      chunks.push(chunk)
+    })
+    req.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')) } catch { reject(new Error('invalid JSON')) }
+    })
+    req.on('error', reject)
+  })
+}
+
+function upstreamRequest(path, options = {}, body) {
+  return new Promise((resolve, reject) => {
+    const request = http.request({ hostname: upstreamHost, port: upstreamPort, path, ...options }, response => {
+      const chunks = []
+      response.on('data', chunk => chunks.push(chunk))
+      response.on('end', () => resolve({ status: response.statusCode || 502, headers: response.headers, body: Buffer.concat(chunks) }))
+    })
+    request.on('error', reject)
+    request.end(body)
+  })
+}
+
+let nativeSession
+async function dshSessionCookie(authority = '127.0.0.1:18081') {
+  const webToken = await token()
+  if (!webToken) throw new Error('DSH authentication token is not ready')
+  if (!nativeSession || nativeSession.token !== webToken || nativeSession.authority !== authority || nativeSession.until < Date.now()) {
+    const entry = { token: webToken, authority, until: Date.now() + 60000 }
+    entry.cookie = (async () => {
+      const response = await upstreamRequest(`/?token=${encodeURIComponent(webToken)}`, { method: 'GET', headers: { host: authority } })
+      const cookies = response.headers['set-cookie'] || []
+      const cookie = cookies.map(value => value.split(';', 1)[0]).find(value => value.startsWith('dsh-auth-'))
+      if (!cookie) throw new Error(`DSH authentication exchange failed with HTTP ${response.status}`)
+      return cookie
+    })()
+    nativeSession = entry
+    void entry.cookie.catch(() => { if (nativeSession === entry) nativeSession = undefined })
+  }
+  return nativeSession.cookie
+}
+
+async function handleGuanyinMcp(req, res, endpoint) {
+  if (req.method !== 'POST' || !process.env.DSH_EXT_TOKEN || req.headers['x-guanyin-token'] !== process.env.DSH_EXT_TOKEN) {
+    res.writeHead(404).end(); return
+  }
+  try {
+    const payload = await readJson(req)
+    const rpcId = randomUUID()
+    const body = JSON.stringify({ type: 'client-request', rpcId, method: endpoint, payload })
+    const response = await upstreamRequest(`/mcp-manager/${endpoint}`, {
+      method: 'POST',
+      headers: { host: '127.0.0.1:18081', cookie: await dshSessionCookie(), 'x-guanyin-token': process.env.DSH_EXT_TOKEN, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+    }, body)
+    res.writeHead(response.status, { 'content-type': response.headers['content-type'] || 'application/json' })
+    res.end(response.body)
+  } catch (error) {
+    res.writeHead(502, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ error: error.message }))
+  }
+}
+
+const GUANYIN_SESSION_METHODS = new Set([
+  'session/cancel',
+  'session/create',
+  'session/modelCatalog',
+  'session/prompt',
+  'session/selectModel',
+  'skills/list',
+])
+
+function isGuanyinRequest(req) {
+  return Boolean(process.env.DSH_EXT_TOKEN) && req.headers['x-guanyin-token'] === process.env.DSH_EXT_TOKEN
+}
+
+async function recordActor(args, actor) {
+  if (!args?.sessionId || !args?.requestId) return
+  const dir = join(process.env.DSH_HOME || '/data/dsh', 'guanyin-usage', 'actors')
+  await mkdir(dir, { recursive: true })
+  const key = createHash('sha256').update(`${args.sessionId}:${args.requestId}`).digest('hex') + '.json'
+  try { await writeFile(join(dir, key), JSON.stringify(actor), { flag: 'wx', mode: 0o600 }) }
+  catch (error) { if (error.code !== 'EEXIST') throw error }
+}
+
+async function handleGuanyinSessionRpc(req, res, method) {
+  if (req.method !== 'POST' || !isGuanyinRequest(req) || !GUANYIN_SESSION_METHODS.has(method)) {
+    res.writeHead(404).end(); return
+  }
+  try {
+    // The bridge accepts the generated Remote method's named arguments and owns
+    // the DSH Connection envelope, correlation id, and browser authentication.
+    const args = await readJson(req)
+    const actor = args.guanyinActor
+    delete args.guanyinActor
+    if (method === 'session/prompt') await recordActor(args.request || args, { source: 'api', userId: actor?.userId || null })
+    const rpcId = randomUUID()
+    const body = JSON.stringify({ type: 'client-request', rpcId, method, payload: { args } })
+    const response = await upstreamRequest(`/api/${method}`, {
+      method: 'POST',
+      headers: { host: '127.0.0.1:18081', cookie: await dshSessionCookie(), 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+    }, body)
+    res.writeHead(response.status, { 'content-type': response.headers['content-type'] || 'application/json' })
+    res.end(response.body)
+  } catch (error) {
+    res.writeHead(502, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ error: error.message }))
+  }
+}
+
+const server = http.createServer(async (req, res) => {
+  let path = req.url || '/'
+  if (path === '/__guanyin/models/sync') {
+    if (req.method !== 'POST' || !isGuanyinRequest(req)) { res.writeHead(404).end(); return }
+    try {
+      const cookie = await dshSessionCookie()
+      const result = await synchronizeModels(await readJson(req, 8 * 1024 * 1024), async (method, args) => {
+        const body = JSON.stringify({ type: 'client-request', rpcId: randomUUID(), method, payload: { args } })
+        const response = await upstreamRequest(`/api/${method}`, { method: 'POST', headers: {
+          host: '127.0.0.1:18081', cookie, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body),
+        } }, body)
+        const data = JSON.parse(response.body.toString('utf8'))
+        if (response.status >= 300 || !data.result?.ok) throw new Error('DSH model settings RPC failed')
+        return data.result.value
+      })
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ ok: true, ...result }))
+    } catch {
+      res.writeHead(502, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ error: '模型同步失败，请检查模型配置、凭证服务及设置版本后重试' }))
+    }
+    return
+  }
+  if (req.method === 'GET' && path === '/__guanyin/identity') {
+    try {
+      const body = JSON.stringify(publicIdentity(verifyIdentity(req)))
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), 'cache-control': 'no-store' })
+      res.end(body)
+    } catch {
+      res.writeHead(401, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+      res.end(JSON.stringify({ error: 'Guanyin identity required' }))
+    }
+    return
+  }
+  if (path === '/__guanyin/connectors' && req.method === 'GET') {
+    try { verifyIdentity(req) } catch { res.writeHead(401).end(); return }
+    try {
+      const body = JSON.stringify({ type: 'client-request', rpcId: randomUUID(), payload: {} })
+      const reply = await upstreamRequest('/mcp-manager/inspect', { method: 'POST', headers: {
+        host: '127.0.0.1:18081', cookie: await dshSessionCookie(), 'x-guanyin-token': process.env.DSH_EXT_TOKEN,
+        'content-type': 'application/json', 'content-length': Buffer.byteLength(body),
+      } }, body)
+      const result = JSON.parse(reply.body.toString('utf8')).result
+      if (!result?.ok) throw new Error('inspect failed')
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(JSON.stringify(result.value))
+    } catch { res.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: '暂时无法读取连接器，请稍后刷新' })) }
+    return
+  }
+  const sessionDeletion = path.match(/^\/__guanyin\/sessions\/(prepare|delete)$/)
+  if (sessionDeletion) {
+    let claims
+    try { claims = verifyIdentity(req) } catch { res.writeHead(401).end(); return }
+    let sameOrigin = !req.headers.origin
+    try { if (req.headers.origin) sameOrigin = new URL(req.headers.origin).host === req.headers.host } catch {}
+    if (req.method !== 'POST' || req.headers['x-guanyin-action'] !== 'session-delete' || req.headers['sec-fetch-site'] === 'cross-site' || !sameOrigin) {
+      res.writeHead(403).end(); return
+    }
+    try {
+      const input = await readJson(req, 8192)
+      const body = JSON.stringify({ sessionId: input.sessionId, confirmation: input.confirmation })
+      const reply = await upstreamRequest(`/guanyin-sessions/${sessionDeletion[1]}`, { method: 'POST', headers: {
+        host: '127.0.0.1:18081', cookie: await dshSessionCookie(), 'x-guanyin-token': process.env.DSH_EXT_TOKEN,
+        'x-guanyin-actor': claims.user?.id || '', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body),
+      } }, body)
+      res.writeHead(reply.status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }).end(reply.body)
+    } catch {
+      res.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: '删除服务暂不可用，请稍后重试' }))
+    }
+    return
+  }
+  if (req.method === 'GET' && (path === '/__guanyin/brand/logo.png' || path === '/__guanyin/brand/favicon.png')) {
+    try {
+      const body = await readFile(brandLogoPath)
+      res.writeHead(200, { 'content-type': 'image/png', 'content-length': body.length, 'cache-control': 'public, max-age=3600' })
+      res.end(body)
+    } catch { res.writeHead(404).end() }
+    return
+  }
+  const internalMcp = path.match(/^\/__guanyin\/mcp-manager\/([A-Za-z0-9_$.-]+)$/)
+  if (internalMcp) return handleGuanyinMcp(req, res, internalMcp[1])
+  const internalSessionRpc = path.match(/^\/__guanyin\/dsh-rpc\/(session\/[A-Za-z0-9_$.-]+|skills\/[A-Za-z0-9_$.-]+)$/)
+  if (internalSessionRpc) return handleGuanyinSessionRpc(req, res, internalSessionRpc[1])
+  // Native DSH auth cookies also collide between spaces/tabs on one host.
+  // Only a valid, space-signed platform identity may exchange native auth;
+  // never trust a caller-supplied browser cookie as the selected space.
+  if (req.headers['x-guanyin-identity']) {
+    try { verifyIdentity(req) } catch {
+      res.writeHead(401, { 'content-type': 'application/json' }).end(JSON.stringify({ error: '空间身份已失效', code: 'AUTH_REQUIRED' })); return
+    }
+    try { req.headers.cookie = await dshSessionCookie(req.headers.host) } catch {
+      res.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: '空间认证尚未就绪，请稍后重试' })); return
+    }
+  }
+  // All workspaces share the Guanyin browser origin.  A DSH cookie from a
+  // different workspace must not suppress this process's token exchange.  A
+  // non-secret fingerprint records which workspace most recently completed
+  // the exchange, avoiding both stale-cookie failures and redirect loops.
+  const acceptsHtml = String(req.headers.accept || '').includes('text/html')
+  const documentRequest = req.headers['sec-fetch-dest'] === 'document' || acceptsHtml
+  const webToken = documentRequest ? await token() : ''
+  const bootstrapping = !req.headers['x-guanyin-identity'] && req.method === 'GET' && documentRequest && webToken && !hasCurrentDshSession(req, webToken)
+  if (bootstrapping) {
+      const url = new URL(path, 'http://dsh.local')
+      url.searchParams.set('token', webToken)
+      path = `${url.pathname}${url.search}`
+  }
+
+  // The pinned 0.2.1 web carrier closes API sockets during browser response
+  // compression negotiation (Chrome advertises gzip/deflate/br/zstd). Keep RPC
+  // and binary-upload responses uncompressed through the internal HTTP hop.
+  // This changes transport encoding only; Origin and authentication stay intact.
+  if (path.split('?')[0].startsWith('/api/')) req.headers['accept-encoding'] = 'identity'
+
+  let meteredBody
+  if (req.method === 'POST' && path.split('?')[0] === '/api/session/prompt') {
+    try {
+      const envelope = await readJson(req, 16 * 1024 * 1024)
+      const args = envelope.payload?.args?.request || envelope.payload?.args
+      if (args?.sessionId && args?.requestId) {
+        let actor = null; try { actor = verifyIdentity(req) } catch {}
+        if (actor) {
+          await recordActor(args, { userId: actor.user.id, source: 'web' })
+        }
+      }
+      meteredBody = JSON.stringify(envelope)
+      delete req.headers['transfer-encoding']
+    } catch { res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: '请求或用量身份记录失败' })); return }
+  }
+  const upstream = http.request({
+    hostname: upstreamHost,
+    port: upstreamPort,
+    method: req.method,
+    path,
+    headers: meteredBody ? { ...req.headers, 'content-length': Buffer.byteLength(meteredBody), 'content-type': 'application/json' } : req.headers,
+  }, upstreamRes => {
+    const headers = { ...upstreamRes.headers }
+    if (bootstrapping) {
+      const cookies = Array.isArray(headers['set-cookie']) ? headers['set-cookie'] : headers['set-cookie'] ? [headers['set-cookie']] : []
+      cookies.push(`guanyin-dsh-session=${sessionFingerprint(webToken)}; Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict`)
+      headers['set-cookie'] = cookies
+    }
+    res.writeHead(upstreamRes.statusCode || 502, headers)
+    upstreamRes.pipe(res)
+  })
+  upstream.on('error', error => {
+    if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' })
+    res.end(`DSH upstream unavailable: ${error.message}`)
+  })
+  if (meteredBody) upstream.end(meteredBody); else req.pipe(upstream)
+})
+
+server.on('upgrade', async (req, socket, head) => {
+  const internalStream = req.url === '/__guanyin/dsh-stream'
+  if (internalStream && !isGuanyinRequest(req)) { socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n'); return }
+  let cookie
+  try { if (!internalStream) verifyIdentity(req) } catch { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); return }
+  try { cookie = await dshSessionCookie(internalStream ? undefined : req.headers.host) } catch { socket.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n'); return }
+  const upstream = net.connect(upstreamPort, upstreamHost, () => {
+    const lines = [`${req.method} ${internalStream ? '/api/remote.mux' : req.url} HTTP/${req.httpVersion}`]
+    if (internalStream) {
+      for (const [name, value] of Object.entries(req.headers)) {
+        if (name === 'host' || name === 'cookie' || name === 'x-guanyin-token' || value === undefined) continue
+        lines.push(`${name}: ${Array.isArray(value) ? value.join(', ') : value}`)
+      }
+      lines.push('host: 127.0.0.1:18081', `cookie: ${cookie}`)
+    } else {
+      for (let index = 0; index < req.rawHeaders.length; index += 2) if (req.rawHeaders[index].toLowerCase() !== 'cookie') lines.push(`${req.rawHeaders[index]}: ${req.rawHeaders[index + 1]}`)
+      lines.push(`cookie: ${cookie}`)
+    }
+    upstream.write(`${lines.join('\r\n')}\r\n\r\n`)
+    if (head.length) upstream.write(head)
+    socket.pipe(upstream).pipe(socket)
+  })
+  const close = () => { socket.destroy(); upstream.destroy() }
+  socket.on('error', close)
+  upstream.on('error', close)
+})
+
+server.listen(3080, '0.0.0.0', () => {
+  console.log('[guanyin-web-proxy:dsh] 0.0.0.0:3080 -> 127.0.0.1:3081')
+})
+
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => server.close(() => process.exit(0)))

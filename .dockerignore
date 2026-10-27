@@ -3,3 +3,8 @@
 **/node_modules
 **/*.log
 docs
+dist
+tmp
+output
+.env
+.env.*

@@ -11,14 +11,18 @@ import { removeSpaceResources, requireDeletePermissions } from './space-admin.mj
 import { modelProviderInput, managedProviderId, modelCredentialRef, testModelConnection, modelSyncDeploymentReady, createModelSyncReconciler } from './model-registry.mjs'
 import { managedMcpConfigMatches } from './mcp-sync.mjs'
 import { apiBuilderTools, executeApiBuilderTool, generateApiDraftWithAi } from './api-builder-mcp.mjs'
-import { createIdentityToken, withoutControlPlaneCookies, withoutInboundIdentityHeaders } from './guanyin-identity.mjs'
+import { createIdentityToken, withoutControlPlaneCookies, withoutInboundIdentityHeaders, enterpriseSessionCookies, ENTERPRISE_SESSION_COOKIE, ENTERPRISE_INSTANCE_COOKIE } from './guanyin-identity.mjs'
 import { inspectLicense, normalizeCustomerName, publicLicenseStatus } from './license.mjs'
+import { runtimeVersions, versionForCreation, imageForSpace } from './runtime-versions.mjs'
+import { auditPromptBeforeForward, PromptAuditError } from './prompt-audit.mjs'
+import { auditSessionDelete, SessionDeleteAuditError } from './session-delete-audit.mjs'
 
 const PORT = Number(process.env.PORT || 8080)
 const PUBLIC_DIR = process.env.PUBLIC_DIR || '/app/public'
 const NAMESPACE = process.env.DSH_NAMESPACE || 'guanyin-enterprise-instances'
 const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.8-arm64'
 const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2-gy.ent.8'
+const DSH_VERSIONS = runtimeVersions({ defaultVersion: DSH_VERSION, defaultImage: DSH_IMAGE, additional: process.env.DSH_ADDITIONAL_VERSIONS })
 const DSH_IMAGE_PULL_POLICY = process.env.DSH_IMAGE_PULL_POLICY || 'IfNotPresent'
 const DSH_STORAGE_CLASS = process.env.DSH_STORAGE_CLASS || ''
 const pvcSize = (name, fallback = '2Gi') => {
@@ -58,14 +62,9 @@ function verifyPassword(password, encoded) {
   return actual.length === expected.length && timingSafeEqual(actual, expected)
 }
 
-function cookies(req) {
-  return Object.fromEntries(String(req.headers.cookie || '').split(';').map(v => v.trim()).filter(Boolean).map(v => {
-    const index = v.indexOf('=')
-    return [decodeURIComponent(v.slice(0, index)), decodeURIComponent(v.slice(index + 1))]
-  }))
-}
+function cookies(req) { return enterpriseSessionCookies(req.headers.cookie) }
 
-async function currentUser(req) { return store.userBySession(cookies(req).guanyin_session) }
+async function currentUser(req) { return store.userBySession(cookies(req).sessionToken) }
 
 function sendJson(res, status, value, headers = {}) {
   const body = JSON.stringify(value)
@@ -297,7 +296,8 @@ function applySpaceModels(instance) {
         if(!apiKey)throw new Error('模型凭证未配置')
         providers.push({id:managedProviderId(provider.code),credentialRef:modelCredentialRef(provider.id),apiKey,config:{...providerConfig,displayName:provider.name}})
       }
-      const defaultProvider=providers.find(p=>p.credentialRef===modelCredentialRef(config.defaultProviderId||''))
+      const defaultDefinition=config.defaultProviderId?await store.modelProviderById(config.defaultProviderId):null
+      const defaultProvider=defaultDefinition?providers.find(p=>p.id===managedProviderId(defaultDefinition.code)):null
       const token=await instanceExtensionToken(instance)
       const response=await fetch(`http://dsh-${instance.slug}.${NAMESPACE}.svc.cluster.local:3080/__guanyin/models/sync`,{
         method:'POST',headers:{'content-type':'application/json','x-guanyin-token':token},
@@ -447,7 +447,15 @@ async function provision(instance) {
     // update never starts two DSH processes against the same home/data PVCs.
     spec: { replicas: 1, strategy: { type: 'Recreate' }, selector: { matchLabels: labels }, template: { metadata: { labels }, spec: {
       securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, fsGroupChangePolicy: 'OnRootMismatch', seccompProfile: { type: 'RuntimeDefault' } },
-      containers: [{ name: 'dsh', image: DSH_IMAGE, imagePullPolicy: DSH_IMAGE_PULL_POLICY, ports: [{ containerPort: 3080 }],
+      // Local-path and other provisioners may mount a root-owned PVC root.
+      // 0.2.1 attachment storage must chmod DSH_HOME to 0700 as its owner.
+      ...(instance.version.startsWith('0.2.1') ? { initContainers: [{
+        name: 'prepare-data-owner', image: imageForSpace(instance, DSH_VERSIONS), imagePullPolicy: DSH_IMAGE_PULL_POLICY,
+        command: ['node', '-e', "const fs=require('node:fs');fs.chownSync('/data/dsh',1000,1000);fs.chmodSync('/data/dsh',0o700)"],
+        securityContext: { runAsNonRoot: false, runAsUser: 0, runAsGroup: 0, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'], add: ['CHOWN', 'FOWNER'] } },
+        volumeMounts: [{ name: 'data', mountPath: '/data/dsh' }],
+      }] } : {}),
+      containers: [{ name: 'dsh', image: imageForSpace(instance, DSH_VERSIONS), imagePullPolicy: DSH_IMAGE_PULL_POLICY, ports: [{ containerPort: 3080 }],
         env: [
           { name: 'GUANYIN_USAGE_URL', value: `http://guanyin-control-plane.guanyin-enterprise-system.svc.cluster.local:18080/internal/usage/${instance.id}` },
           { name: 'DSH_HOME', value: '/data/dsh' }, { name: 'BANKOPS_WEB_PROXY', value: '1' },
@@ -480,6 +488,9 @@ async function refreshInstanceStatus(instance) {
 }
 
 async function scaleInstance(instance, replicas) {
+  // A resumed space must get a fresh idle window before it becomes running.
+  // Otherwise its pre-sleep last_active_at can immediately put it back to sleep.
+  if (replicas > 0) await store.touchInstance(instance.id)
   await k8sRequest('PATCH', `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}/scale`, { spec: { replicas } })
   const status = replicas === 0 ? 'stopped' : 'starting'
   await store.updateInstance(instance.id, { status, error: null })
@@ -626,14 +637,14 @@ async function api(req, res, path) {
     const token = randomBytes(32).toString('base64url')
     await store.createSession(token, user.id, Date.now() + SESSION_TTL)
     await audit({ actorUserId: user.id, action: 'user_login', targetUserId: user.id, details: { ip: clientIp(req) } })
-    return sendJson(res, 200, { user: publicUser(user) }, { 'set-cookie': `guanyin_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL / 1000}` })
+    return sendJson(res, 200, { user: publicUser(user) }, { 'set-cookie': `${ENTERPRISE_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL / 1000}` })
   }
   const user = await currentUser(req)
   if (!user) return sendJson(res, 401, { error: '请先登录' })
   if (path === '/api/logout' && req.method === 'POST') {
     await audit({ actorUserId: user.id, action: 'user_logout', targetUserId: user.id, details: { ip: clientIp(req) } })
-    await store.deleteSession(cookies(req).guanyin_session)
-    return sendJson(res, 200, { ok: true }, { 'set-cookie': 'guanyin_session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0' })
+    await store.deleteSession(cookies(req).sessionToken)
+    return sendJson(res, 200, { ok: true }, { 'set-cookie': `${ENTERPRISE_SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0` })
   }
   if (path === '/api/me') return sendJson(res, 200, { user: publicUser(user), version: DSH_VERSION })
   const canManageApi = user.role === 'platform_admin' || user.apiAdmin
@@ -794,8 +805,8 @@ async function api(req, res, path) {
     if (instance.status === 'stopped' || instance.status === 'stopping') { await scaleInstance(instance, 1); return sendJson(res, 202, { starting: true }) }
     if (instance.status !== 'running') return sendJson(res, 202, { starting: true })
     markInstanceActive(instance.id)
-    await audit({ actorUserId: user.id, action: 'dsh_enter', targetInstanceId: instance.id, targetUserId: user.id, details: { accessRole: instance.accessRole, ip: clientIp(req) } })
-    return sendJson(res, 200, { location: '/' }, { 'set-cookie': `guanyin_instance=${instance.id}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL / 1000}` })
+    await audit({ actorUserId: user.id, action: 'dsh_enter', targetInstanceId: instance.id, targetUserId: user.id, details: { runtimeVersion: instance.version, accessRole: instance.accessRole, ip: clientIp(req) } })
+    return sendJson(res, 200, { location: '/' }, { 'set-cookie': `${ENTERPRISE_INSTANCE_COOKIE}=${instance.id}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL / 1000}` })
   }
   const lifecycle = path.match(/^\/api\/instances\/([^/]+)\/(start|stop)$/)
   if (lifecycle && req.method === 'POST') {
@@ -949,7 +960,7 @@ async function api(req, res, path) {
     try{const sync=await applySpaceModels(instance);return sendJson(res,200,{config:await store.spaceModelConfig(instance.id),sync})}
     catch{return sendJson(res,200,{config:await store.spaceModelConfig(instance.id),sync:{status:'error'}})}
   }
-  if (path === '/api/admin/overview') { const data = await store.overview(new URL(req.url, 'http://localhost').searchParams.get('metadataOnly') === 'true'); return sendJson(res, 200, { ...data, users: data.users.map(publicUser), versions: [{ id: DSH_VERSION, image: DSH_IMAGE, enabled: true }] }) }
+  if (path === '/api/admin/overview') { const data = await store.overview(new URL(req.url, 'http://localhost').searchParams.get('metadataOnly') === 'true'); return sendJson(res, 200, { ...data, users: data.users.map(publicUser), versions: DSH_VERSIONS }) }
   if (path === '/api/admin/users' && req.method === 'GET') {
     try {
       const result = await store.listAdminUsers(new URL(req.url, 'http://localhost').searchParams)
@@ -1047,11 +1058,17 @@ async function api(req, res, path) {
     const instance = await store.instanceById(impersonate[1])
     if (!instance) return sendJson(res, 404, { error: '实例不存在' })
     await refreshInstanceStatus(instance)
+    if (instance.status === 'stopped' || instance.status === 'stopping') {
+      await scaleInstance(instance, 1)
+      await audit({ actorUserId: user.id, action: 'admin_instance_start', targetInstanceId: instance.id, details: { source: 'admin_impersonation', ip: clientIp(req) } })
+      return sendJson(res, 202, { starting: true, message: '空间已唤醒，正在启动，请等待运行中后再次进入' })
+    }
+    if (instance.status === 'starting' || instance.status === 'provisioning') return sendJson(res, 202, { starting: true, message: '空间正在启动，请等待运行中后再次进入' })
     if (instance.status !== 'running') return sendJson(res, 409, { error: '实例尚未就绪，请先启动并等待运行中' })
     await audit({ actorUserId: user.id, action: 'admin_impersonation_start', targetInstanceId: instance.id, details: { source: 'space_management', ip: clientIp(req) } })
-    await store.grantAdminAccess(cookies(req).guanyin_session, instance.id, Date.now() + SESSION_TTL)
+    await store.grantAdminAccess(cookies(req).sessionToken, instance.id, Date.now() + SESSION_TTL)
     markInstanceActive(instance.id)
-    return sendJson(res, 200, { location: '/', warning: `您正在以平台管理员身份代入访问空间 ${instance.name}` }, { 'set-cookie': `guanyin_instance=${instance.id}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL / 1000}` })
+    return sendJson(res, 200, { location: '/', warning: `您正在以平台管理员身份代入访问空间 ${instance.name}` }, { 'set-cookie': `${ENTERPRISE_INSTANCE_COOKIE}=${instance.id}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL / 1000}` })
   }
   if (path === '/api/admin/tenants' && req.method === 'POST') {
     const input = await bodyJson(req); const code = safeName(input.code)
@@ -1125,8 +1142,9 @@ async function api(req, res, path) {
     const input = await bodyJson(req); const displayName = String(input.name || '').trim(); const slugBase = safeName(displayName) || 'workspace'; const timeout = idleTimeout(input.idleTimeoutMinutes)
     if (!displayName || !await store.tenantExists(input.tenantId) || timeout === undefined) return sendJson(res, 400, { error: '空间名称、租户或休眠规则无效' })
     const requestedVersion = String(input.version || DSH_VERSION)
-    if (requestedVersion !== DSH_VERSION) return sendJson(res, 400, { error: '运行核心版本无效' })
-    const instance = { id: randomUUID(), name: displayName, slug: `${slugBase}-${randomBytes(3).toString('hex')}`, version: DSH_VERSION, image: DSH_IMAGE, tenantId: input.tenantId, status: 'provisioning', idleTimeoutMinutes: timeout, createdAt: new Date().toISOString() }
+    let selectedVersion
+    try { selectedVersion = versionForCreation(DSH_VERSIONS, requestedVersion) } catch (error) { return sendJson(res, 400, { error: error.message }) }
+    const instance = { id: randomUUID(), name: displayName, slug: `${slugBase}-${randomBytes(3).toString('hex')}`, version: selectedVersion.id, image: selectedVersion.image, tenantId: input.tenantId, status: 'provisioning', idleTimeoutMinutes: timeout, createdAt: new Date().toISOString() }
     await store.createInstance(instance)
     try {
       await provision(instance); instance.status = 'starting'; await store.updateInstance(instance.id, { status: instance.status })
@@ -1153,11 +1171,11 @@ async function staticFile(req, res, path) {
 async function selectedInstance(req) {
   const user = await currentUser(req)
   if (!user) return undefined
-  const instanceId = cookies(req).guanyin_instance
+  const instanceId = cookies(req).instanceId
   if (!/^[0-9a-f-]{36}$/i.test(instanceId || '')) return undefined
   const owned = await store.instanceOwnedByUser(instanceId, user.id)
   if (owned) return { ...owned, impersonated: false }
-  if (user.role === 'platform_admin' && await store.hasAdminAccess(cookies(req).guanyin_session, instanceId)) {
+  if (user.role === 'platform_admin' && await store.hasAdminAccess(cookies(req).sessionToken, instanceId)) {
     const instance = await store.instanceById(instanceId)
     return instance ? { ...instance, accessRole: 'platform_admin', impersonated: true } : undefined
   }
@@ -1166,21 +1184,37 @@ async function selectedInstance(req) {
 
 async function proxyHttp(req, res, instance, user) {
   markInstanceActive(instance.id)
-  const startedAt = Date.now()
+  let promptBody, deletionAudit
+  try {
+    promptBody = await auditPromptBeforeForward(req, { user, instance, save: store.createAuditLog, ip: clientIp(req) })
+    deletionAudit = await auditSessionDelete(req, { user, instance, save: store.createAuditLog, complete: store.completeSessionDeletionAudit, ip: clientIp(req), log: message => console.error(message) })
+    if (deletionAudit) promptBody = deletionAudit.body
+  }
+  catch (error) {
+    if (error instanceof PromptAuditError || error instanceof SessionDeleteAuditError) return sendJson(res, error.status, { error: error.message })
+    return sendJson(res, 400, { error: '请求读取失败，操作尚未提交' })
+  }
   // DSH validates Origin against Host for its privileged /api RPC methods.
   // Preserve the browser-facing authority so settings, models and image-baked
   // management plugins keep the same-origin identity seen by the browser.
   const identity = createIdentityToken({ user, instance, impersonated: instance.impersonated }, await instanceExtensionToken(instance))
   const headers = { ...withoutControlPlaneCookies(withoutInboundIdentityHeaders(req.headers)), host: req.headers.host || PUBLIC_HOSTS.split(',')[0], 'x-guanyin-identity': identity }
+  if (promptBody !== undefined) {
+    delete headers['transfer-encoding']
+    headers['content-length'] = promptBody.length
+  }
   const upstream = http.request({ hostname: `dsh-${instance.slug}.${NAMESPACE}.svc.cluster.local`, port: 3080, path: req.url, method: req.method, headers }, upstreamRes => {
-    if (req.method === 'POST') {
-      const rpcPath = new URL(req.url, 'http://localhost').pathname.slice(0, 200)
-      audit({ actorUserId: user.id, action: 'dsh_operation', targetInstanceId: instance.id, targetUserId: user.id, details: { method: req.method, path: rpcPath, status: upstreamRes.statusCode, durationMs: Date.now() - startedAt, ip: clientIp(req) } })
-    }
-    res.writeHead(upstreamRes.statusCode, upstreamRes.headers); upstreamRes.pipe(res)
+    const forward = () => { res.writeHead(upstreamRes.statusCode, upstreamRes.headers); upstreamRes.pipe(res) }
+    if (deletionAudit) void deletionAudit.finish(upstreamRes.statusCode).then(forward)
+    else forward()
   })
-  upstream.on('error', error => sendJson(res, 502, { error: `DSH 实例暂不可用：${error.message}` }))
-  req.pipe(upstream)
+  upstream.on('error', error => {
+    const reply = () => sendJson(res, 502, { error: `DSH 实例暂不可用：${error.message}` })
+    if (deletionAudit) void deletionAudit.finish().then(reply)
+    else reply()
+  })
+  if (promptBody !== undefined) upstream.end(promptBody)
+  else req.pipe(upstream)
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1219,13 +1253,15 @@ const server = http.createServer(async (req, res) => {
       || path.startsWith('/api/admin/')
     if (controlApi) return await api(req, res, path)
     const user = await currentUser(req)
-    if (!user) return redirect(res, '/login')
-    if (path === '/' && !cookies(req).guanyin_instance) return redirect(res, '/console')
+    if (!user) return path === '/api' || path.startsWith('/api/')
+      ? sendJson(res, 401, { error: '登录已失效，请重新登录观因企业版', code: 'AUTH_REQUIRED' })
+      : redirect(res, '/login')
+    if (path === '/' && !cookies(req).instanceId) return redirect(res, '/console')
     const instance = await selectedInstance(req)
     if (!instance) return path === '/api' || path.startsWith('/api/')
       ? sendJson(res, 403, { error: '请先选择工作空间' })
       : redirect(res, '/console')
-    return proxyHttp(req, res, instance, user)
+    return await proxyHttp(req, res, instance, user)
   } catch (error) {
     if (isDevelopment) console.error(error)
     sendJson(res, 500, { error: '服务器内部错误' })
@@ -1260,7 +1296,7 @@ server.listen(PORT, '0.0.0.0', () => console.log(`Guanyin control plane listenin
 // idempotent; sleeping spaces are skipped and receive them on their next start.
 setTimeout(async () => {
   for (const instance of await store.listAllInstances()) {
-    if (instance.version !== DSH_VERSION) continue
+    if (!instance.image && !DSH_VERSIONS.some(version => version.id === instance.version)) continue
     try { await Promise.all([applySpaceMcp(instance), applySpaceModels(instance)]) } catch (error) { console.error(`failed to reconcile MCP for ${instance.id}:`, error) }
   }
 }, 3_000 + Math.floor(Math.random() * 2_000)).unref()

@@ -2,6 +2,8 @@
 ARG BASE_IMAGE=bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.7-arm64
 FROM ${BASE_IMAGE}
 USER root
+COPY deploy/dsh-0.1.5-core/patch-pi-no-auth.mjs /opt/dsh-runtime/patch-pi-no-auth.mjs
+RUN node /opt/dsh-runtime/patch-pi-no-auth.mjs
 COPY deploy/dsh-0.1.5-core/guanyin-ui-policy/lib/index.js /tmp/guanyin-usage-index.js
 COPY deploy/dsh-0.1.5-core/guanyin-ui-policy/lib/usage.js /tmp/guanyin-usage.js
 COPY deploy/dsh-0.1.5-core/guanyin-ui-policy/lib/client.js /tmp/guanyin-ui-client.js

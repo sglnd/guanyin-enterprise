@@ -16,7 +16,7 @@ test('usage aggregates across spaces, isolates dimensions, deduplicates and expi
   await db.query("INSERT INTO users VALUES($1,$2,'actual','真实用户')",[user,tenant])
   const instance={id:s1,tenantId:tenant,name:'空间甲'},event={id:randomUUID(),userId:user,sessionId:'session',provider:'p',model:'m',occurredAt:new Date().toISOString(),inputTokens:40,outputTokens:10,totalTokens:50,cacheReadTokens:20,durationMs:100,result:'success',quality:'reported'}
   assert.equal(await ingestUsage(db,instance,[event]),1);assert.equal(await ingestUsage(db,instance,[event]),0)
-  await ingestUsage(db,{...instance,id:s2,name:'空间乙'},[{...event,id:randomUUID(),result:'error'}])
+  await ingestUsage(db,{...instance,id:s2,name:'空间乙',version:'0.2.1-rc.2-gy.ent.1'},[{...event,id:randomUUID(),result:'error',requestId:'request-021',source:'web'}])
   await ingestUsage(db,instance,[{...event,id:randomUUID(),quality:'unknown'}])
   await ingestUsage(db,{id:randomUUID(),tenantId:other,name:'其他租户'},[{...event,id:randomUUID()}])
   const users=await queryUsage(db,new URLSearchParams({group:'user',tenantId:tenant}))
@@ -26,6 +26,10 @@ test('usage aggregates across spaces, isolates dimensions, deduplicates and expi
   assert.equal((await queryUsage(db,new URLSearchParams({group:'model'}))).rows[0].calls,4)
   assert.equal((await queryUsage(db,new URLSearchParams({group:'detail',userId:'unattributed'}))).total,1)
   assert.equal((await queryUsage(db,new URLSearchParams({group:'detail',q:'空间甲',tenantId:tenant}))).total,2)
+  const newDetail=(await queryUsage(db,new URLSearchParams({group:'detail',spaceId:s2}))).rows[0]
+  assert.equal(newDetail.spaceVersion,'0.2.1-rc.2-gy.ent.1');assert.equal(newDetail.requestId,'request-021');assert.equal(newDetail.source,'web')
+  const legacyDetail=(await queryUsage(db,new URLSearchParams({group:'detail',spaceId:s1}))).rows[0]
+  assert.equal(legacyDetail.source,'unknown');assert.equal(legacyDetail.requestId,'')
   const old={...event,id:randomUUID(),occurredAt:'2020-01-01T00:00:00Z'}
   assert.equal(await ingestUsage(db,instance,[old]),0)
   await db.query("UPDATE model_usage_events SET occurred_at=now()-interval '2 years' WHERE id=$1",[event.id])

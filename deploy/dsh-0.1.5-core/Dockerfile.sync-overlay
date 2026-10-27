@@ -1,0 +1,10 @@
+# Preserve the retained 0.1.5 runtime and its plugins; fix only SDK no-key access.
+ARG RUNTIME_IMAGE=bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.8-arm64
+FROM ${RUNTIME_IMAGE}
+USER root
+RUN node -e 'if(require("/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json").version!=="0.1.5-rc.2")throw new Error("requires 0.1.5-rc.2")'
+COPY deploy/dsh-0.1.5-core/patch-pi-no-auth.mjs /opt/dsh-runtime/patch-pi-no-auth.mjs
+COPY deploy/dsh-0.1.5-core/model-sync.mjs /opt/dsh-runtime/model-sync.mjs
+RUN node /opt/dsh-runtime/patch-pi-no-auth.mjs
+USER node
+LABEL org.opencontainers.image.version="0.1.5-rc.2-gy.ent.8-sync1"

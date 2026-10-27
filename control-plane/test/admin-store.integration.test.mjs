@@ -66,7 +66,7 @@ test('admin pagination and deletion preserve history while revoking access', { s
     })
     await db.query("UPDATE api_runs SET status='succeeded' WHERE id=$1",[runId])
     await t.test('deletion blocks access and new runs, retries, then hides space without erasing audit history',async()=>{
-      await store.createAuditLog({id:randomUUID(),actorUserId:memberId,action:'test',targetInstanceId:instanceId,details:{}})
+      await store.createAuditLog({id:randomUUID(),actorUserId:memberId,action:'user_chat_input',targetInstanceId:instanceId,details:{}})
       await store.beginSpaceDeletion(instanceId)
       assert.equal(await store.instanceById(instanceId),undefined)
       assert.equal(await store.instanceOwnedByUser(instanceId,memberId),undefined)
@@ -91,7 +91,7 @@ test('admin pagination and deletion preserve history while revoking access', { s
       await store.createUser({id:userId,username,displayName:'待删除用户',role:'member',tenantId,passwordHash:'test',enabled:true,createdAt:new Date()})
       await store.setInstanceMember(ids[1],userId,'member')
       await store.createSession('deleted-user-session',userId,Date.now()+60000)
-      await store.createAuditLog({id:randomUUID(),actorUserId:userId,action:'test'})
+      await store.createAuditLog({id:randomUUID(),actorUserId:userId,action:'user_chat_input'})
       await assert.rejects(store.deleteUser(userId,'wrong'), /用户名/)
       await store.deleteUser(userId,username)
       assert.equal(await store.userById(userId),undefined)

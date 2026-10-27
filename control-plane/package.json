@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs && node --check license.mjs && node --check dsh-adapter.mjs && node --check api-runner.mjs && node --check api-contract.mjs && node --check api-builder-mcp.mjs && node --check audit-log.mjs && node --check usage.mjs && node --check mcp-sync.mjs && node --check model-registry.mjs && node --check ../deploy/dsh-0.1.5-core/model-sync.mjs && node --check ../deploy/dsh-0.1.5-core/web-proxy.mjs && node --check ../deploy/dsh-0.1.5-core/guanyin-ui-policy/lib/usage.js && node --check space-admin.mjs && node --check store.mjs && node --check public/app.js",
+    "check": "node --check server.mjs && node --check license.mjs && node --check dsh-adapter.mjs && node --check api-runner.mjs && node --check api-contract.mjs && node --check api-builder-mcp.mjs && node --check audit-log.mjs && node --check prompt-audit.mjs && node --check session-delete-audit.mjs && node --check usage.mjs && node --check mcp-sync.mjs && node --check model-registry.mjs && node --check ../deploy/dsh-0.1.5-core/model-sync.mjs && node --check ../deploy/dsh-0.1.5-core/web-proxy.mjs && node --check ../deploy/dsh-0.1.5-core/guanyin-ui-policy/lib/usage.js && node --check space-admin.mjs && node --check store.mjs && node --check public/app.js",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {

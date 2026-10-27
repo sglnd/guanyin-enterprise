@@ -4,7 +4,7 @@ export function usageEvent(input, now=Date.now()) {
   const count=value=>value===null||value===undefined?null:Number.isSafeInteger(value)&&value>=0?value:NaN
   const occurredAt=new Date(input.occurredAt)
   if(!uuid.test(input.id)||!Number.isFinite(occurredAt.getTime())||occurredAt.getTime()>now+300000)throw Error('用量事件标识或时间无效')
-  const value={id:input.id,occurredAt:occurredAt.toISOString(),sessionId:text(input.sessionId),provider:text(input.provider),model:text(input.model),userId:uuid.test(input.userId)?input.userId:null,
+  const value={requestId:text(input.requestId),source:['web','api','schedule','subagent','compaction','session-title'].includes(input.source)?input.source:'unknown',id:input.id,occurredAt:occurredAt.toISOString(),sessionId:text(input.sessionId),provider:text(input.provider),model:text(input.model),userId:uuid.test(input.userId)?input.userId:null,
     inputTokens:count(input.inputTokens),outputTokens:count(input.outputTokens),totalTokens:count(input.totalTokens),cacheReadTokens:count(input.cacheReadTokens),cacheWriteTokens:count(input.cacheWriteTokens),durationMs:count(input.durationMs),result:input.result,quality:input.quality}
   if(!value.provider||!value.model||!['success','error','cancelled'].includes(value.result)||!['reported','estimated','unknown'].includes(value.quality)||Object.values(value).some(v=>typeof v==='number'&&Number.isNaN(v)))throw Error('用量事件字段无效')
   if(value.quality==='unknown'){for(const k of ['inputTokens','outputTokens','totalTokens','cacheReadTokens','cacheWriteTokens'])value[k]=null}
@@ -28,6 +28,9 @@ export async function initializeUsage(pool){await pool.query(`CREATE TABLE IF NO
  duration_ms bigint,result text NOT NULL CHECK(result IN ('success','error','cancelled')),
  quality text NOT NULL CHECK(quality IN ('reported','estimated','unknown')),received_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY(space_id,id));
+ ALTER TABLE model_usage_events ADD COLUMN IF NOT EXISTS space_version text NOT NULL DEFAULT '';
+ ALTER TABLE model_usage_events ADD COLUMN IF NOT EXISTS request_id text NOT NULL DEFAULT '';
+ ALTER TABLE model_usage_events ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'unknown';
  CREATE INDEX IF NOT EXISTS usage_time_idx ON model_usage_events(occurred_at);
  CREATE INDEX IF NOT EXISTS usage_user_time_idx ON model_usage_events(user_id,occurred_at);
  CREATE INDEX IF NOT EXISTS usage_space_time_idx ON model_usage_events(space_id,occurred_at);
@@ -38,9 +41,9 @@ export async function ingestUsage(pool,instance,events){
  try{await client.query('BEGIN')
   for(const e of rows){
    const user=e.userId?(await client.query('SELECT id,display_name,username FROM users WHERE id=$1 AND tenant_id=$2',[e.userId,instance.tenantId])).rows[0]:null
-   const result=await client.query(`INSERT INTO model_usage_events(id,space_id,tenant_id,user_id,space_name,tenant_name,user_name,session_id,provider,model,occurred_at,input_tokens,output_tokens,total_tokens,cache_read_tokens,cache_write_tokens,duration_ms,result,quality)
-     SELECT $1,$2,$3,$4,$5,t.name,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18 FROM tenants t WHERE t.id=$3 AND $10::timestamptz>=now()-interval '1 year'
-     ON CONFLICT(space_id,id) DO NOTHING`,[e.id,instance.id,instance.tenantId,user?.id||null,instance.name,user?`${user.display_name} (${user.username})`:null,e.sessionId,e.provider,e.model,e.occurredAt,e.inputTokens,e.outputTokens,e.totalTokens,e.cacheReadTokens,e.cacheWriteTokens,e.durationMs,e.result,e.quality]);accepted+=result.rowCount
+   const result=await client.query(`INSERT INTO model_usage_events(id,space_id,tenant_id,user_id,space_name,tenant_name,user_name,session_id,provider,model,occurred_at,input_tokens,output_tokens,total_tokens,cache_read_tokens,cache_write_tokens,duration_ms,result,quality,space_version,request_id,source)
+     SELECT $1,$2,$3,$4,$5,t.name,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21 FROM tenants t WHERE t.id=$3 AND $10::timestamptz>=now()-interval '1 year'
+     ON CONFLICT(space_id,id) DO NOTHING`,[e.id,instance.id,instance.tenantId,user?.id||null,instance.name,user?`${user.display_name} (${user.username})`:null,e.sessionId,e.provider,e.model,e.occurredAt,e.inputTokens,e.outputTokens,e.totalTokens,e.cacheReadTokens,e.cacheWriteTokens,e.durationMs,e.result,e.quality,instance.version||'',e.requestId,e.source]);accepted+=result.rowCount
   }await client.query('COMMIT');return accepted
  }catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
 }
@@ -68,7 +71,7 @@ export async function queryUsage(pool,params){
  const group=q.group==='detail'?'':`GROUP BY ${dimensions[q.group][0]}`
  const total=Number((await pool.query(`SELECT count(*)::int AS total FROM (SELECT 1 FROM model_usage_events ${where} ${group}) x`,values)).rows[0].total)
  const page=Math.min(q.page,Math.max(1,Math.ceil(total/q.pageSize)))
- const select=q.group==='detail'?`id,space_id AS "spaceId",tenant_id AS "tenantId",user_id AS "userId",space_name AS "spaceName",tenant_name AS "tenantName",user_name AS "userName",session_id AS "sessionId",provider,model,occurred_at AS "occurredAt",input_tokens::text AS "inputTokens",output_tokens::text AS "outputTokens",total_tokens::text AS "totalTokens",cache_read_tokens::text AS "cacheReadTokens",cache_write_tokens::text AS "cacheWriteTokens",duration_ms::text AS "durationMs",result,quality`:`${dimensions[q.group][0]} AS id,${dimensions[q.group][1]} AS name,${aggregate}`
+ const select=q.group==='detail'?`id,space_version AS "spaceVersion",request_id AS "requestId",source,space_id AS "spaceId",tenant_id AS "tenantId",user_id AS "userId",space_name AS "spaceName",tenant_name AS "tenantName",user_name AS "userName",session_id AS "sessionId",provider,model,occurred_at AS "occurredAt",input_tokens::text AS "inputTokens",output_tokens::text AS "outputTokens",total_tokens::text AS "totalTokens",cache_read_tokens::text AS "cacheReadTokens",cache_write_tokens::text AS "cacheWriteTokens",duration_ms::text AS "durationMs",result,quality`:`${dimensions[q.group][0]} AS id,${dimensions[q.group][1]} AS name,${aggregate}`
  const rows=(await pool.query(`SELECT ${select} FROM model_usage_events ${where} ${group} ORDER BY ${q.group==='detail'?'occurred_at DESC,id':'calls DESC,id'} LIMIT $${values.length+1} OFFSET $${values.length+2}`,[...values,q.pageSize,(page-1)*q.pageSize])).rows
  const trend=(await pool.query(`SELECT to_char(occurred_at AT TIME ZONE 'Asia/Shanghai','YYYY-MM-DD') AS day,${aggregate} FROM model_usage_events ${where} GROUP BY day ORDER BY day`,values)).rows
  const providers=(await pool.query("SELECT DISTINCT provider FROM model_usage_events WHERE occurred_at>=now()-interval '1 year' ORDER BY provider LIMIT 1000")).rows.map(r=>r.provider)

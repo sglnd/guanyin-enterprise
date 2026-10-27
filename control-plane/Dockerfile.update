@@ -1,0 +1,13 @@
+# Reuse a verified runtime of the target architecture, replacing all app sources.
+ARG BASE_IMAGE=guanyin/control-plane:0.7.2-enterprise.5-amd64
+FROM ${BASE_IMAGE}
+USER root
+COPY control-plane/package*.json /tmp/guanyin-package/
+RUN if ! cmp -s /app/package-lock.json /tmp/guanyin-package/package-lock.json; then \
+      cp /tmp/guanyin-package/package*.json /app/ && cd /app && npm ci --omit=dev; \
+    fi && rm -rf /tmp/guanyin-package
+COPY control-plane/*.mjs control-plane/package*.json /app/
+COPY control-plane/public /app/public
+COPY assets/branding/guanyin-mark-graphite-cinnabar-v4.png /app/public/guanyin-logo.png
+USER 10001
+LABEL org.opencontainers.image.version="0.7.2-enterprise.6"

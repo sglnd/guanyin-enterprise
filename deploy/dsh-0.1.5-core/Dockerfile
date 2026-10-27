@@ -49,6 +49,8 @@ RUN --mount=type=cache,target=/root/.npm export DSH_HOME=/opt/dsh-seed \
     && mkdir -p /workspace /home/node /opt/dsh-runtime /data/dsh \
     && chown -R node:node /opt/dsh-seed /opt/dsh-docs-venv /workspace /home/node /opt/dsh-runtime /data/dsh
 
+COPY deploy/dsh-0.1.5-core/patch-pi-no-auth.mjs /opt/dsh-runtime/patch-pi-no-auth.mjs
+RUN node /opt/dsh-runtime/patch-pi-no-auth.mjs
 COPY deploy/dsh-0.1.5-core/model-sync.mjs /opt/dsh-runtime/model-sync.mjs
 COPY deploy/dsh-0.1.5-core/web-proxy.mjs /opt/dsh-runtime/web-proxy.mjs
 COPY assets/branding/guanyin-mark-graphite-cinnabar-v4.png /opt/dsh-runtime/guanyin-logo.png

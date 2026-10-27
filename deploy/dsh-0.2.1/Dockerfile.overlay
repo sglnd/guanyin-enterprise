@@ -1,0 +1,20 @@
+# Fast enterprise-layer iteration over a pinned, already-built 0.2.1 runtime.
+# The full Dockerfile remains the clean Node/npm/Chromium build recipe.
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE}
+USER root
+RUN node -e 'if(require("/opt/dsh-runtime/node_modules/@deepseek-ai/dsh/package.json").version!=="0.2.1-rc.3")throw new Error("overlay requires rc3 runtime; use full Dockerfile for runtime upgrades")'
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM=xterm-256color
+COPY deploy/dsh-0.2.1/enterprise-plugin /opt/dsh-runtime/node_modules/@guanyin/dsh-enterprise
+COPY deploy/dsh-0.2.1/web-proxy.mjs /opt/dsh-runtime/web-proxy.mjs
+COPY deploy/dsh-0.2.1/profile-compat.mjs /opt/dsh-runtime/profile-compat.mjs
+COPY deploy/dsh-0.2.1/entrypoint.mjs /opt/dsh-runtime/entrypoint.mjs
+COPY deploy/dsh-0.2.1/patch-http-bridge.mjs /opt/dsh-runtime/patch-http-bridge.mjs
+RUN node /opt/dsh-runtime/patch-http-bridge.mjs
+COPY deploy/dsh-0.2.1/patch-session-log-menu.mjs /opt/dsh-runtime/patch-session-log-menu.mjs
+RUN node /opt/dsh-runtime/patch-session-log-menu.mjs
+COPY deploy/dsh-0.2.1/patch-workspace.mjs /opt/dsh-runtime/patch-workspace.mjs
+RUN node /opt/dsh-runtime/patch-workspace.mjs
+USER node
+
+LABEL org.opencontainers.image.version="0.2.1-rc.3-gy.ent.7"

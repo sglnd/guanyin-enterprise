@@ -1,0 +1,48 @@
+- id: ui-brand-official
+  disabled: true
+- id: workspace-controller
+  config:
+    documentsDirectory: /workspace
+- id: ui-settings-account
+  disabled: true
+- id: session-log-deepseek
+  disabled: true
+- id: ui-settings-session-log
+  disabled: true
+- id: ui-plugin-manager
+  disabled: true
+- id: ui-settings-plugin-inventory
+  disabled: true
+- id: ui-settings-plugins
+  disabled: true
+- id: tool-plugin-manager
+  disabled: true
+- id: ui-settings-web-search
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: llm-deepseek
+  disabled: true
+- id: llm-deepseek-account
+  disabled: true
+- id: ui-deepseek-model-label-1017
+  disabled: true
+- insert:
+    - id: guanyin-enterprise
+      name: '@guanyin/dsh-enterprise'
+    - id: browser-use
+      name: '@deepseek-ai/dsh-browser-use'
+    - id: guanyin-browser-playwright
+      name: '@deepseek-ai/dsh-experimental-browser-use-playwright-mcp'
+      config:
+        mode: launch
+        headless: true
+        executablePath: /usr/bin/chromium
+
+# rc3 adds plugin browsing/creation menus. Keep enterprise composition fixed.
+- id: entry-customization
+  disabled: true
+# Pin plugin binaries to the image; skill contents remain managed in-space.
+- id: skills-manager
+  config:
+    onlineUpdate: false

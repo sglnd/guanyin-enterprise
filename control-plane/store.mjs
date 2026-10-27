@@ -1,4 +1,4 @@
-import { queryAuditLogs, pruneAuditLogs } from './audit-log.mjs'
+import { queryAuditLogs, pruneAuditLogs, shouldRecordAudit } from './audit-log.mjs'
 import { initializeUsage, ingestUsage, queryUsage, pruneUsage } from './usage.mjs'
 import { createHash } from 'node:crypto'
 import pg from 'pg'
@@ -240,11 +240,15 @@ export async function instanceById(id, includeDeleting = false) {
 }
 
 export async function createAuditLog({ id, actorUserId, action, targetInstanceId, targetUserId, details = {} }) {
+  if (!shouldRecordAudit(action)) return
   await pool.query(`INSERT INTO audit_logs(id,actor_user_id,action,target_instance_id,target_user_id,details)
     VALUES($1,$2,$3,$4,$5,$6)`, [id, actorUserId, action, targetInstanceId || null, targetUserId || null, details])
 }
 
 export const listAuditLogs = options => queryAuditLogs(pool, options)
+export async function completeSessionDeletionAudit(id, result) {
+  await pool.query("UPDATE audit_logs SET details=details || $2::jsonb WHERE id=$1 AND action='session_delete'", [id, JSON.stringify(result)])
+}
 export const purgeAuditLogs = () => pruneAuditLogs(pool)
 
 export async function grantAdminAccess(token, instanceId, expiresAt) {

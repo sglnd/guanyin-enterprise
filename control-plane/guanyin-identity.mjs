@@ -3,6 +3,21 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 const ISSUER = 'guanyin-control-plane'
 const AUDIENCE = 'guanyin-dsh'
 
+// Browser cookies share a hostname across ports. The community installation
+// must never replace the enterprise login or selected workspace.
+export const ENTERPRISE_SESSION_COOKIE = 'guanyin_ent_session'
+export const ENTERPRISE_INSTANCE_COOKIE = 'guanyin_ent_instance'
+export function enterpriseSessionCookies(header = '') {
+  const values = new Map()
+  for (const part of String(header || '').split(';')) {
+    const index = part.indexOf('=')
+    if (index < 0) continue
+    const name = part.slice(0, index).trim()
+    if (name === ENTERPRISE_SESSION_COOKIE || name === ENTERPRISE_INSTANCE_COOKIE) values.set(name, part.slice(index + 1).trim())
+  }
+  return { sessionToken: values.get(ENTERPRISE_SESSION_COOKIE), instanceId: values.get(ENTERPRISE_INSTANCE_COOKIE) }
+}
+
 function encode(value) {
   return Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)).toString('base64url')
 }
@@ -54,7 +69,7 @@ export function withoutControlPlaneCookies(headers = {}) {
   const cookieKey = Object.keys(sanitized).find(name => name.toLowerCase() === 'cookie')
   if (!cookieKey) return sanitized
   const cookies = String(sanitized[cookieKey] || '').split(';').map(value => value.trim()).filter(Boolean)
-    .filter(value => !/^guanyin_(?:session|instance)=/i.test(value))
+    .filter(value => !/^guanyin_(?:ent_)?(?:session|instance)=/i.test(value))
   if (cookies.length) sanitized[cookieKey] = cookies.join('; ')
   else delete sanitized[cookieKey]
   return sanitized
