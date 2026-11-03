@@ -547,7 +547,8 @@ async function provision(instance) {
             }
           }
         `],
-        securityContext: { runAsNonRoot: false, runAsUser: 0, runAsGroup: 0, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'], add: ['CHOWN', 'FOWNER'] } },
+        // The init process must open the credential even on an existing 0700 volume.
+        securityContext: { runAsNonRoot: false, runAsUser: 0, runAsGroup: 0, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'], add: ['CHOWN', 'FOWNER', 'DAC_OVERRIDE'] } },
         volumeMounts: [{ name: 'data', mountPath: '/data/dsh' }],
       }] } : {}),
       containers: [{ name: 'dsh', image: imageForSpace(instance, DSH_VERSIONS), imagePullPolicy: DSH_IMAGE_PULL_POLICY, ports: [{ containerPort: 3080 }],
