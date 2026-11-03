@@ -19,6 +19,13 @@ COPY deploy/dsh-0.2.1/runtime/package*.json ./
 RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund && npm cache clean --force
 RUN npm install-scripts approve @deepseek-ai/dsh-subprocess-local koffi node-pty @google/genai protobufjs \
     && npm rebuild
+COPY deploy/dsh-0.2.1/vendor/dsh-mermaid-web-0.1.0.tar.gz /tmp/guanyin-mermaid.tgz
+COPY deploy/dsh-0.2.1/patch-mermaid.mjs /opt/dsh-runtime/patch-mermaid.mjs
+RUN mkdir -p /opt/dsh-runtime/node_modules/dsh-mermaid-web \
+    && tar -xzf /tmp/guanyin-mermaid.tgz -C /opt/dsh-runtime/node_modules/dsh-mermaid-web --strip-components=1 \
+    && node /opt/dsh-runtime/patch-mermaid.mjs && rm /tmp/guanyin-mermaid.tgz
+COPY deploy/dsh-0.2.1/patch-browser-proxy.mjs /opt/dsh-runtime/patch-browser-proxy.mjs
+RUN node /opt/dsh-runtime/patch-browser-proxy.mjs
 COPY deploy/dsh-0.2.1/enterprise-plugin /opt/dsh-runtime/node_modules/@guanyin/dsh-enterprise
 COPY deploy/dsh-0.1.5-core/model-sync.mjs ./model-sync.mjs
 COPY deploy/dsh-0.2.1/web-proxy.mjs ./web-proxy.mjs

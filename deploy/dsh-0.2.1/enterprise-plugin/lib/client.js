@@ -3,65 +3,6 @@ window.__ModuleLoader__.load({
   factory: require => {
     const React = require('react')
     const h = React.createElement
-    let mermaidEngine
-    function engine() {
-      if (window.__GenuiAssets__?.mermaid) return Promise.resolve(window.__GenuiAssets__.mermaid)
-      return mermaidEngine ||= new Promise((resolve, reject) => {
-        const script = document.createElement('script')
-        script.src = '/plugins/@changfenhuang/dsh-genui/assets/mermaid.js'
-        script.onload = () => window.__GenuiAssets__?.mermaid ? resolve(window.__GenuiAssets__.mermaid) : reject(new Error('Mermaid engine unavailable'))
-        script.onerror = () => reject(new Error('Mermaid asset unavailable'))
-        document.head.append(script)
-      })
-    }
-    // Share GenUI's local, sanitized Mermaid engine instead of shipping a
-    // second 7 MB renderer. Keep the source available and leave streaming
-    // fences alone; failed diagrams retain their ordinary code presentation.
-    function installMermaid(ctx) {
-      const owned = new Set()
-      let stopped = false, timer
-      let queue = Promise.resolve()
-      function scan() {
-        for (const entry of owned) if (!entry.block.isConnected) owned.delete(entry)
-        for (const block of document.querySelectorAll('.md-code-block')) {
-          if (block.dataset.guanyinMermaid || block.dataset.codeStreaming === 'true' || block.closest('[data-streaming]')) continue
-          const language = (block.dataset.codeLanguage || block.children[0]?.children[0]?.children[0]?.textContent)?.trim().toLowerCase()
-          if (language !== 'mermaid') continue
-          const source = block.querySelector('pre')?.textContent
-          if (!source?.trim()) continue
-          block.dataset.guanyinMermaid = 'pending'
-          queue = queue.catch(() => {}).then(async () => {
-            try {
-              const api = await engine()
-              const svg = await api.renderMermaid(source, block)
-              api.assertSafeSvg(svg)
-              if (stopped || !block.isConnected) return
-              const preview = document.createElement('div')
-              preview.setAttribute('role', 'img'); preview.setAttribute('aria-label', 'Mermaid 图表')
-              preview.style.cssText = 'padding:16px;overflow:auto;background:var(--dsw-alias-bg-layer-1);'
-              const parsed = new DOMParser().parseFromString(svg, 'image/svg+xml')
-              preview.append(document.importNode(parsed.documentElement, true))
-              const details = document.createElement('details')
-              const summary = document.createElement('summary'); summary.textContent = '查看图表源码'
-              details.append(summary)
-              const original = [...block.children]
-              details.append(...original)
-              block.append(preview, details); block.dataset.guanyinMermaid = 'ready'
-              owned.add({ block, preview, details, original })
-            } catch { block.dataset.guanyinMermaid = 'failed' }
-          })
-        }
-      }
-      const observer = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(scan, 100) })
-      observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-streaming', 'data-code-streaming'] })
-      scan()
-      ctx.effect(() => () => {
-        stopped = true; clearTimeout(timer); observer.disconnect()
-        for (const { block, preview, details, original } of owned) {
-          if (block.isConnected) { block.append(...original); preview.remove(); details.remove(); delete block.dataset.guanyinMermaid }
-        }
-      }, 'guanyin: shared Mermaid fences')
-    }
     function Mark({ size = 24 }) {
       return h('span', { className: 'guanyin-brand-mark', 'aria-label': '观因', style: { width: size * 1.5, height: size, display: 'inline-block', flexShrink: 0, background: 'currentColor', mask: "url('/__guanyin/brand/logo.png') center / contain no-repeat", WebkitMask: "url('/__guanyin/brand/logo.png') center / contain no-repeat" } })
     }
@@ -286,7 +227,6 @@ window.__ModuleLoader__.load({
           )))
     }
     function apply(ctx) {
-      installMermaid(ctx)
       installEnterpriseSettings(ctx)
       installSessionDeletion(ctx)
       ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'guanyin-connectors', label: '连接器', order: 16 }, Connectors))

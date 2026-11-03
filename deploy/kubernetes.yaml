@@ -32,6 +32,9 @@ metadata:
   name: guanyin-instance-manager
   namespace: guanyin-enterprise-instances
 rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
   - apiGroups: [""]
     resources: ["services", "secrets", "configmaps"]
     verbs: ["get", "list", "create", "patch", "update", "delete"]
@@ -207,6 +210,13 @@ spec:
               value: 0.2.1-rc.3-gy.ent.7
             - name: DSH_ADDITIONAL_VERSIONS
               value: '[{"id":"0.1.5-rc.2-gy.ent.8-sync1","label":"0.1.5-rc2","image":"bankops/guanyin-enterprise-dsh:gy.ent.8-sync1-arm64","enabled":true}]'
+            # Enable proxy only after validating NetworkPolicy enforcement and required destinations.
+            - name: DSH_EGRESS_MODE
+              value: disabled
+            - name: DSH_NETWORK_POLICY_VERIFIED
+              value: "false"
+            - name: GUANYIN_SYSTEM_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
             - name: DSH_NAMESPACE
               value: guanyin-enterprise-instances
             - name: DSH_TRUSTED_HOSTS

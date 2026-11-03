@@ -1,7 +1,10 @@
+import {dnsAddresses,managedEgressPolicy,managedProxyEnvironment,withManagedEgress,createEgressReconciler,assertNoExtraEgress} from './egress-policy.mjs'
+import { networkRulesInput } from './network-policy.mjs'
+import { discoverMcpTools } from './mcp-discovery.mjs'
 import http from 'node:http'
 import https from 'node:https'
 import net from 'node:net'
-import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import * as store from './store.mjs'
@@ -9,7 +12,7 @@ import { ApiRunWorker, createDshAdapter, isTerminalApiRun, validateApiInput } fr
 import { generateApiDocumentation, normalizeApiManifest } from './api-contract.mjs'
 import { removeSpaceResources, requireDeletePermissions } from './space-admin.mjs'
 import { modelProviderInput, managedProviderId, modelCredentialRef, testModelConnection, modelSyncDeploymentReady, createModelSyncReconciler } from './model-registry.mjs'
-import { managedMcpConfigMatches } from './mcp-sync.mjs'
+import { gatewayMcpEntry, managedMcpConfigMatches } from './mcp-sync.mjs'
 import { apiBuilderTools, executeApiBuilderTool, generateApiDraftWithAi } from './api-builder-mcp.mjs'
 import { createIdentityToken, withoutControlPlaneCookies, withoutInboundIdentityHeaders, enterpriseSessionCookies, ENTERPRISE_SESSION_COOKIE, ENTERPRISE_INSTANCE_COOKIE } from './guanyin-identity.mjs'
 import { inspectLicense, normalizeCustomerName, publicLicenseStatus } from './license.mjs'
@@ -38,6 +41,10 @@ const DSH_PVC_SIZES = {
 const PUBLIC_HOSTS = process.env.DSH_TRUSTED_HOSTS || 'localhost:18081,127.0.0.1:18081'
 const DSH_PERMISSION_MODE = process.env.DSH_PERMISSION_MODE || 'danger-full-access'
 const API_BUILDER_MCP_URL = process.env.API_BUILDER_MCP_URL || 'http://guanyin-control-plane.guanyin-enterprise-system.svc.cluster.local:18081/internal/mcp/api-builder'
+const MCP_GATEWAY_URL = process.env.MCP_GATEWAY_URL || 'http://guanyin-mcp-gateway.guanyin-enterprise-system.svc.cluster.local:8080'
+const EGRESS_MODE = process.env.DSH_EGRESS_MODE || 'disabled'
+if (!['disabled','proxy'].includes(EGRESS_MODE)) throw new Error('DSH_EGRESS_MODE 必须为 disabled 或 proxy')
+const EGRESS_VERIFIED=process.env.DSH_NETWORK_POLICY_VERIFIED==='true'
 const SESSION_TTL = 12 * 60 * 60 * 1000
 const IDLE_TIMEOUT_MINUTES = Number(process.env.IDLE_TIMEOUT_MINUTES || 60)
 const isDevelopment = process.env.NODE_ENV !== 'production'
@@ -113,7 +120,11 @@ function mcpInput(input, updating = false) {
     if (!headers || Array.isArray(headers) || Object.values(headers).some(value => typeof value !== 'string')) throw new Error('请求头必须是 JSON 字符串键值对象')
   }
   if (!name || !/^[A-Za-z0-9_-]{1,32}$/.test(serverName) || !/^https?:\/\/.+/.test(url)) throw new Error('MCP 名称、serverName 或服务地址无效')
-  return { name, serverName, description, transport: 'streamable-http', url, headers, enabled: input.enabled === true || input.enabled === 'true' }
+  const allowedTools = Array.isArray(input.allowedTools) ? input.allowedTools : String(input.allowedTools || '').split(/[\s,，、]+/).filter(Boolean)
+  if (allowedTools.some(x => typeof x !== 'string' || !/^[A-Za-z0-9_.:-]{1,128}$/.test(x))) throw new Error('工具名称请用换行、空格、逗号或顿号分隔，不支持通配符')
+  const maxConcurrency = Number(input.maxConcurrency ?? 8), requestsPerMinute = Number(input.requestsPerMinute ?? 120)
+  if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1 || maxConcurrency > 1000 || !Number.isInteger(requestsPerMinute) || requestsPerMinute < 1 || requestsPerMinute > 100000) throw new Error('并发或频率限制无效')
+  return { allowedTools: [...new Set(allowedTools)], maxConcurrency, requestsPerMinute, name, serverName, description, transport: 'streamable-http', url, headers, enabled: input.enabled === true || input.enabled === 'true' }
 }
 
 function publicUser(user) { return { id: user.id, username: user.username, displayName: user.displayName, role: user.role, mcpAdmin: user.mcpAdmin, apiAdmin: user.apiAdmin, tenantId: user.tenantId, tenantName: user.tenantName, enabled: user.enabled } }
@@ -224,11 +235,20 @@ async function waitForDeploymentReady(path, generation, replicas, timeoutMs = 12
   throw new Error('MCP 配置已保存，但空间刷新超时，请稍后查看空间状态')
 }
 
-function mcpEntry(item) {
-  return { id: `guanyin-mcp-${item.serverName}`, config: {
-    serverName: item.serverName, transport: item.transport, url: item.url,
-    ...(Object.keys(item.headers || {}).length ? { headers: item.headers } : {}),
-  } }
+
+async function spaceMcpToken(instance) {
+  const path = `/api/v1/namespaces/${NAMESPACE}/secrets/dsh-${instance.slug}`
+  const secret = await k8sRequest('GET', path)
+  // Derive a separate credential, never expose the internal management token.
+  const extension = Buffer.from(secret.data?.extensionToken || '', 'base64').toString('utf8')
+  if (!extension) throw new Error('空间内部密钥不存在')
+  const token = createHmac('sha256', extension).update('guanyin-mcp-gateway-v1').digest('hex')
+  await store.setMcpGatewayToken(instance.id, token)
+  if (!secret.data?.mcpProxyUrl) {
+    const proxy = new URL(MCP_GATEWAY_URL); proxy.port = '8081'; proxy.username = 'space'; proxy.password = token; proxy.pathname = '/'
+    await k8sRequest('PATCH', path, { stringData: { mcpProxyUrl: proxy.toString() } })
+  }
+  return token
 }
 
 async function callMcpManager(instance, endpoint, payload = {}) {
@@ -341,7 +361,7 @@ async function reconcileSpaceMcp(instance) {
   const bindings = await store.listSpaceMcpBindings(instance.id, true)
   const revision = `${Date.now()}`
   await upsertResource('ConfigMap', name, { apiVersion: 'v1', kind: 'ConfigMap', metadata: { name, labels }, data: {
-    'config.json': JSON.stringify({ revision, servers: bindings.map(({ headers, ...item }) => item) }, null, 2),
+    'config.json': JSON.stringify({ revision, servers: bindings.map(({ headers, ...item }) => ({ ...item, url: `${MCP_GATEWAY_URL}/mcp/${item.id}` })) }, null, 2),
   } })
   const deploymentPath = `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`
   const deployment = await k8sRequest('GET', deploymentPath)
@@ -349,7 +369,8 @@ async function reconcileSpaceMcp(instance) {
   if (replicas === 0) return revision
   const token = await instanceExtensionToken(instance)
   const current = await callMcpManager(instance, 'list')
-  const desired = new Map(bindings.filter(item => item.enabled).map(item => { const entry = mcpEntry(item); return [entry.id, entry] }))
+  const gatewayToken = await spaceMcpToken(instance)
+  const desired = new Map(bindings.filter(item => item.enabled).map(item => { const entry = gatewayMcpEntry(item, gatewayToken, MCP_GATEWAY_URL); return [entry.id, entry] }))
   const apiBuilder = { id: 'guanyin-mcp-api-builder', config: {
     serverName: 'guanyin-api-builder', transport: 'streamable-http', url: API_BUILDER_MCP_URL,
     headers: { 'X-Guanyin-Instance': instance.id, 'X-Guanyin-Token': token },
@@ -422,7 +443,54 @@ async function manageableSpace(user, instanceId) {
   return instance && ['owner','operator'].includes(instance.accessRole) ? instance : undefined
 }
 
+function egressBypassHosts() {
+  const ns=process.env.GUANYIN_SYSTEM_NAMESPACE||'guanyin-enterprise-system'
+  const hosts=[new URL(MCP_GATEWAY_URL).hostname,new URL(API_BUILDER_MCP_URL).hostname,`guanyin-control-plane.${ns}.svc.cluster.local`]
+  return [...new Set(hosts.flatMap(x=>[x,x.replace(/\.cluster\.local$/,'')]))]
+}
+async function migrateSpaceEgress(instance) {
+  if(instance.status==='deleting')return
+  if(!instance.version.startsWith('0.2.1')) { console.error(`空间 ${instance.id} 需要先升级到支持代理的 0.2.1 镜像，尚未启用隔离`);return }
+  const path=`/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`
+  let deployment
+  try { deployment=await k8sRequest('GET',path) } catch(error) { if(error.statusCode===404)return;throw error }
+  await spaceMcpToken(instance)
+  const template=withManagedEgress(deployment,`dsh-${instance.slug}`,egressBypassHosts())
+  const policies=await k8sRequest('GET',`/apis/networking.k8s.io/v1/namespaces/${NAMESPACE}/networkpolicies`)
+  assertNoExtraEgress(policies.items||[],template.metadata.labels)
+  const applied=JSON.stringify(template)!==JSON.stringify(deployment.spec.template)?await k8sRequest('PATCH',path,{spec:{template}}):deployment
+  const replicas=Number(applied.spec.replicas||0)
+  if(replicas>0)await waitForDeploymentReady(path,applied.metadata.generation,replicas)
+}
+async function spaceEgressState(instance) {
+  if(EGRESS_MODE!=='proxy')return egressStatus
+  if(!instance.version.startsWith('0.2.1'))return {ready:false,message:'此空间版本需要先升级代理能力'}
+  if(!egressStatus.ready)return egressStatus
+  try {
+    await k8sRequest('GET',`/apis/networking.k8s.io/v1/namespaces/${NAMESPACE}/networkpolicies/guanyin-managed-space-egress`)
+    const d=await k8sRequest('GET',`/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`)
+    const n=Number(d.spec.replicas||0)
+    const ready=d.spec.template.metadata.labels?.['guanyin.io/egress']==='managed'&&(!n||(Number(d.status.observedGeneration||0)>=d.metadata.generation&&Number(d.status.updatedReplicas||0)>=n&&Number(d.status.availableReplicas||0)>=n))
+    return {ready,message:ready?(n?'基础连接自动放行；其他出口经过代理白名单':'基础规则已下发，下次启动时应用'):'正在迁移空间代理配置并重启'}
+  } catch{return {ready:false,message:'无法确认空间和基础网络策略状态'}}
+}
+let egressReconciler
+let egressStatus={ready:false,message:EGRESS_MODE==='proxy'?'正在应用基础网络规则':'平台未启用网络协调；已有策略可能仍生效，请联系管理员确认'}
+async function ensureManagedEgress() {
+  if(EGRESS_MODE!=='proxy')return
+  if(!EGRESS_VERIFIED){egressStatus={ready:false,message:'CNI 策略执行能力尚未验证，平台未自动迁移空间'};return}
+  if(!egressReconciler){
+    const systemNamespace=process.env.GUANYIN_SYSTEM_NAMESPACE || 'guanyin-enterprise-system'
+    const dnsIPs=dnsAddresses(await readFile('/etc/resolv.conf','utf8'),process.env.DSH_DNS_IPS)
+    const gatewayUrl=new URL(MCP_GATEWAY_URL)
+    const gatewayNamespace=process.env.MCP_GATEWAY_NAMESPACE || gatewayUrl.hostname.split('.')[1] || systemNamespace
+    egressReconciler=createEgressReconciler({request:k8sRequest,policy:managedEgressPolicy({namespace:NAMESPACE,systemNamespace,gatewayNamespace,controlPort:PORT,gatewayPort:Number(gatewayUrl.port||80),dnsIPs}),list:store.listAllInstances,migrate:migrateSpaceEgress})
+  }
+  try {await egressReconciler.tick();egressStatus={ready:true,message:'平台基础规则已协调，额外访问通过代理白名单控制'}}catch(error){egressStatus={ready:false,message:error.message};throw error}
+}
 async function provision(instance) {
+  await ensureManagedEgress()
+  if(EGRESS_MODE==='proxy'&&!EGRESS_VERIFIED)throw new Error('管理员尚未验证网络策略执行能力，暂不能创建受管空间')
   const name = `dsh-${instance.slug}`
   const labels = { 'app.kubernetes.io/name': 'dsh', 'guanyin.io/instance': instance.id }
   // Port 3080 belongs to the lightweight Guanyin proxy and opens before the
@@ -433,7 +501,11 @@ async function provision(instance) {
     'node', '-e',
     "const net=require('net');const s=net.connect({host:'127.0.0.1',port:3081});const t=setTimeout(()=>{s.destroy();process.exit(1)},2000);s.once('connect',()=>{clearTimeout(t);s.destroy();process.exit(0)});s.once('error',()=>{clearTimeout(t);process.exit(1)})",
   ]
-  await createResource('Secret', { apiVersion: 'v1', kind: 'Secret', metadata: { name, labels }, stringData: { extensionToken: randomBytes(32).toString('hex') } })
+  const extensionToken = randomBytes(32).toString('hex')
+  const mcpToken = createHmac('sha256', extensionToken).update('guanyin-mcp-gateway-v1').digest('hex')
+  const proxyUrl = new URL(MCP_GATEWAY_URL); proxyUrl.port = '8081'; proxyUrl.username = 'space'; proxyUrl.password = mcpToken
+  await store.setMcpGatewayToken(instance.id, mcpToken)
+  await createResource('Secret', { apiVersion: 'v1', kind: 'Secret', metadata: { name, labels }, stringData: { extensionToken, mcpProxyUrl: proxyUrl.toString() } })
   const mcpName = mcpResourceName(instance)
   await createResource('ConfigMap', { apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: mcpName, labels }, data: { 'config.json': JSON.stringify({ revision: 'initial', servers: [] }) } })
   for (const suffix of ['data', 'home', 'workspace']) await createResource('PersistentVolumeClaim', {
@@ -441,23 +513,51 @@ async function provision(instance) {
     spec: { accessModes: ['ReadWriteOnce'], ...(DSH_STORAGE_CLASS ? { storageClassName: DSH_STORAGE_CLASS } : {}), resources: { requests: { storage: DSH_PVC_SIZES[suffix] } } },
   })
   await createResource('Service', { apiVersion: 'v1', kind: 'Service', metadata: { name, labels }, spec: { selector: labels, ports: [{ name: 'web', port: 3080, targetPort: 3080 }] } })
-  await createResource('Deployment', {
+  const deploymentResource = {
     apiVersion: 'apps/v1', kind: 'Deployment', metadata: { name, labels },
     // Each workspace uses ReadWriteOnce volumes. Recreate guarantees that an
     // update never starts two DSH processes against the same home/data PVCs.
     spec: { replicas: 1, strategy: { type: 'Recreate' }, selector: { matchLabels: labels }, template: { metadata: { labels }, spec: {
+      automountServiceAccountToken: false,
       securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, fsGroupChangePolicy: 'OnRootMismatch', seccompProfile: { type: 'RuntimeDefault' } },
       // Local-path and other provisioners may mount a root-owned PVC root.
       // 0.2.1 attachment storage must chmod DSH_HOME to 0700 as its owner.
       ...(instance.version.startsWith('0.2.1') ? { initContainers: [{
         name: 'prepare-data-owner', image: imageForSpace(instance, DSH_VERSIONS), imagePullPolicy: DSH_IMAGE_PULL_POLICY,
-        command: ['node', '-e', "const fs=require('node:fs');fs.chownSync('/data/dsh',1000,1000);fs.chmodSync('/data/dsh',0o700)"],
+        command: ['node', '-e', `
+          const fs = require('node:fs')
+          fs.chownSync('/data/dsh', 1000, 1000)
+          fs.chmodSync('/data/dsh', 0o700)
+          // Volume setup can restore group access to an existing credential file.
+          let fd
+          try {
+            fd = fs.openSync('/data/dsh/.credentials.yaml',
+              fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK)
+          } catch (error) {
+            if (error.code !== 'ENOENT') throw error
+          }
+          if (fd !== undefined) {
+            try {
+              const stat = fs.fstatSync(fd)
+              if (!stat.isFile() || stat.nlink !== 1) throw new Error('Expected a regular credential file without hard links')
+              fs.fchmodSync(fd, 0o600)
+              fs.fchownSync(fd, 1000, 1000)
+            } finally {
+              fs.closeSync(fd)
+            }
+          }
+        `],
         securityContext: { runAsNonRoot: false, runAsUser: 0, runAsGroup: 0, allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'], add: ['CHOWN', 'FOWNER'] } },
         volumeMounts: [{ name: 'data', mountPath: '/data/dsh' }],
       }] } : {}),
       containers: [{ name: 'dsh', image: imageForSpace(instance, DSH_VERSIONS), imagePullPolicy: DSH_IMAGE_PULL_POLICY, ports: [{ containerPort: 3080 }],
         env: [
+          ...(EGRESS_MODE==='proxy'&&instance.version.startsWith('0.2.1')?managedProxyEnvironment(name,egressBypassHosts()):[]),
           { name: 'GUANYIN_USAGE_URL', value: `http://guanyin-control-plane.guanyin-enterprise-system.svc.cluster.local:18080/internal/usage/${instance.id}` },
+          { name: 'GUANYIN_BROWSER_PROXY_URL', valueFrom: { secretKeyRef: { name, key: 'mcpProxyUrl', optional: true } } },
+          { name: 'HTTPS_PROXY', valueFrom: { secretKeyRef: { name, key: 'mcpProxyUrl', optional: true } } },
+          { name: 'HTTP_PROXY', valueFrom: { secretKeyRef: { name, key: 'mcpProxyUrl', optional: true } } },
+          { name: 'NO_PROXY', value: '.svc,.svc.cluster.local,localhost,127.0.0.1' },
           { name: 'DSH_HOME', value: '/data/dsh' }, { name: 'BANKOPS_WEB_PROXY', value: '1' },
           { name: 'DSH_BROWSER_AUTH_MODE', value: 'trusted-host' }, { name: 'DSH_TRUSTED_HOSTS', value: PUBLIC_HOSTS },
           { name: 'DSH_PERMISSION_MODE', value: DSH_PERMISSION_MODE },
@@ -475,7 +575,9 @@ async function provision(instance) {
       volumes: [{ name: 'data', persistentVolumeClaim: { claimName: `${name}-data` } }, { name: 'home', persistentVolumeClaim: { claimName: `${name}-home` } }, { name: 'workspace', persistentVolumeClaim: { claimName: `${name}-workspace` } },
         { name: 'guanyin-mcp-config', configMap: { name: mcpName } }],
     } } },
-  })
+  }
+  if(EGRESS_MODE==='proxy'&&instance.version.startsWith('0.2.1'))deploymentResource.spec.template=withManagedEgress(deploymentResource,name,egressBypassHosts())
+  await createResource('Deployment',deploymentResource)
 }
 
 async function refreshInstanceStatus(instance) {
@@ -822,6 +924,10 @@ async function api(req, res, path) {
     return sendJson(res, 202, { instance: result })
   }
   const canManageMcp = user.role === 'platform_admin' || user.mcpAdmin
+  if (path === '/api/mcp-calls' && req.method === 'GET') {
+    if (!canManageMcp) return sendJson(res, 403, { error: '需要 MCP 管理员权限' })
+    return sendJson(res, 200, { calls: await store.listMcpGatewayCalls() })
+  }
   if (path === '/api/mcp-servers' && req.method === 'GET') return sendJson(res, 200, { servers: await store.listMcpServers(), canManage: canManageMcp })
   if (path === '/api/mcp-servers' && req.method === 'POST') {
     if (!canManageMcp) return sendJson(res, 403, { error: '需要平台管理员或 MCP 管理员权限' })
@@ -835,6 +941,15 @@ async function api(req, res, path) {
       if (error.code === '23505') return sendJson(res, 400, { error: 'serverName 已存在' })
       return sendJson(res, 400, { error: error.message })
     }
+  }
+  if (path === '/api/mcp-servers/discover' && req.method === 'POST') {
+    if (!canManageMcp) return sendJson(res, 403, { error: '需要 MCP 管理员权限' })
+    try {
+      const input = await bodyJson(req)
+      const saved = input.id ? await store.mcpServerById(input.id, true) : null
+      const headers = input.headers?.trim() ? JSON.parse(input.headers) : saved?.headers || {}
+      return sendJson(res, 200, await discoverMcpTools({ url: input.url, headers }))
+    } catch { return sendJson(res, 400, { error: 'MCP 连接或工具发现失败，请检查地址与认证配置' }) }
   }
   const mcpServer = path.match(/^\/api\/mcp-servers\/([^/]+)$/)
   if (mcpServer && req.method === 'PATCH') {
@@ -868,6 +983,28 @@ async function api(req, res, path) {
     if (!canManageMcp) return sendJson(res, 403, { error: '需要平台管理员或 MCP 管理员权限' })
     return sendJson(res, 200, { spaces: await store.listMcpSpaces(mcpSpaces[1]) })
   }
+  const networkSpace = path.match(/^\/api\/instances\/([^/]+)\/network-policy$/)
+  if (networkSpace && ['GET','PUT'].includes(req.method)) {
+    const instance = user.role === 'platform_admin' ? await store.instanceById(networkSpace[1]) : await manageableSpace(user, networkSpace[1])
+    if (!instance) return sendJson(res,403,{error:'无权访问该空间'})
+    if (req.method === 'GET') return sendJson(res,200,{...await store.spaceNetworkPolicy(instance.id),canManage:user.role==='platform_admin',isolationMode:EGRESS_MODE,isolationStatus:await spaceEgressState(instance)})
+    if (user.role !== 'platform_admin') return sendJson(res,403,{error:'只有平台管理员可以修改网络白名单'})
+    if (!instance.version.startsWith('0.2.1')) return sendJson(res,400,{error:'浏览器代理配置目前仅支持 0.2.1 空间'})
+    let origins
+    try { origins = networkRulesInput((await bodyJson(req)).allowedOrigins) } catch(error) { return sendJson(res,400,{error:error.message}) }
+    await spaceMcpToken(instance)
+    await store.setSpaceNetworkPolicy(instance.id,origins)
+    const deploymentPath = `/apis/apps/v1/namespaces/${NAMESPACE}/deployments/dsh-${instance.slug}`
+    const deployment = await k8sRequest('GET',deploymentPath)
+    const containers = deployment.spec.template.spec.containers
+    const container = containers.find(x=>x.name==='dsh')
+    container.env = (container.env||[]).filter(x=>x.name!=='GUANYIN_BROWSER_PROXY_URL')
+    container.env.push({name:'GUANYIN_BROWSER_PROXY_URL',valueFrom:{secretKeyRef:{name:`dsh-${instance.slug}`,key:'mcpProxyUrl'}}})
+    const appliedContainers=EGRESS_MODE==='proxy'?withManagedEgress(deployment,`dsh-${instance.slug}`,egressBypassHosts()).spec.containers:containers
+    await k8sRequest('PATCH',deploymentPath,{spec:{template:{metadata:{annotations:{'guanyin.io/network-policy-revision':String(Date.now())}},spec:{containers:appliedContainers}}}})
+    await audit({actorUserId:user.id,action:'space_network_update',targetInstanceId:instance.id,details:{allowedOrigins:origins}})
+    return sendJson(res,200,{allowedOrigins:origins,restarting:Number(deployment.spec.replicas||0)>0})
+  }
   const spaceMcp = path.match(/^\/api\/instances\/([^/]+)\/mcp-bindings$/)
   if (spaceMcp && req.method === 'GET') {
     const instance = await manageableSpace(user, spaceMcp[1])
@@ -875,7 +1012,8 @@ async function api(req, res, path) {
     return sendJson(res, 200, { bindings: await store.listSpaceMcpBindings(instance.id) })
   }
   if (spaceMcp && req.method === 'PUT') {
-    const instance = await manageableSpace(user, spaceMcp[1]); const input = await bodyJson(req)
+    if (!canManageMcp) return sendJson(res, 403, { error: '需要 MCP 管理员授权' })
+    const instance = await store.instanceById(spaceMcp[1]); const input = await bodyJson(req)
     const server = await store.mcpServerById(input.mcpServerId)
     if (!instance) return sendJson(res, 403, { error: '无权管理该空间的 MCP' })
     if (!server?.enabled) return sendJson(res, 400, { error: 'MCP 服务不存在或已停用' })
@@ -886,7 +1024,8 @@ async function api(req, res, path) {
   }
   const removeSpaceMcp = path.match(/^\/api\/instances\/([^/]+)\/mcp-bindings\/([^/]+)$/)
   if (removeSpaceMcp && req.method === 'DELETE') {
-    const instance = await manageableSpace(user, removeSpaceMcp[1]); const server = await store.mcpServerById(removeSpaceMcp[2])
+    if (!canManageMcp) return sendJson(res, 403, { error: '需要 MCP 管理员授权' })
+    const instance = await store.instanceById(removeSpaceMcp[1]); const server = await store.mcpServerById(removeSpaceMcp[2])
     if (!instance) return sendJson(res, 403, { error: '无权管理该空间的 MCP' })
     if (!server || !await store.removeSpaceMcpBinding(instance.id, server.id)) return sendJson(res, 404, { error: '空间未接入该 MCP' })
     const revision = await applySpaceMcp(instance)
@@ -1248,7 +1387,8 @@ const server = http.createServer(async (req, res) => {
       || /^\/api\/instances\/[^/]+\/(launch|start|stop)$/.test(path)
       || /^\/api\/instances\/[^/]+\/mcp-bindings(?:\/[^/]+)?$/.test(path)
       || /^\/api\/instances\/[^/]+\/api-credentials(?:\/[^/]+(?:\/grants)?)?$/.test(path)
-      || path.startsWith('/api/mcp-servers')
+      || /^\/api\/instances\/[^/]+\/network-policy$/.test(path)
+      || path.startsWith('/api/mcp-servers') || path === '/api/mcp-calls'
       || path.startsWith('/api/api-definitions') || path.startsWith('/api/api-runs/') || path.startsWith('/api/api-builder/') || path === '/api/api-catalog'
       || path.startsWith('/api/admin/')
     if (controlApi) return await api(req, res, path)
@@ -1263,6 +1403,7 @@ const server = http.createServer(async (req, res) => {
       : redirect(res, '/console')
     return await proxyHttp(req, res, instance, user)
   } catch (error) {
+    console.error('control-plane request failed', { method: req.method, path: req.url?.split('?')[0], code: error.code || error.name, message: error.message })
     if (isDevelopment) console.error(error)
     sendJson(res, 500, { error: '服务器内部错误' })
   }
@@ -1310,6 +1451,9 @@ const purgeExpiredLogs = () => Promise.all([
   store.purgeAuditLogs().catch(() => console.error('审计日志保留期清理失败')),
 ])
 void purgeExpiredLogs()
+const egressTimer=setInterval(()=>{void ensureManagedEgress().catch(error=>console.error('网络策略协调失败:',error.message))},30000)
+egressTimer.unref()
+void ensureManagedEgress().catch(error=>console.error('网络策略初始化失败:',error.message))
 const usageRetentionTimer = setInterval(() => { void purgeExpiredLogs() }, 3_600_000)
 usageRetentionTimer.unref()
 const modelSyncTimer = setInterval(() => {

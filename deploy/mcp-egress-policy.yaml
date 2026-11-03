@@ -1,0 +1,38 @@
+# Reference only: control plane generates/reconciles this policy when managed egress is enabled.
+# Enforce only AFTER model and other required traffic has been migrated/tested.
+# Requires a CNI implementing NetworkPolicy. Policy rules are additive: remove
+# other broad egress allows. Does not cover hostNetwork/privileged workloads.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: guanyin-managed-space-egress
+  namespace: guanyin-enterprise-instances
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: dsh, guanyin.io/egress: managed }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: guanyin-enterprise-system }
+          podSelector:
+            matchLabels: { app: guanyin-mcp-gateway }
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 8081 }
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: guanyin-enterprise-system }
+          podSelector:
+            matchLabels: { app: guanyin-control-plane }
+      ports:
+        - { protocol: TCP, port: 8080 }
+        - { protocol: TCP, port: 18081 }
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

@@ -4,6 +4,9 @@ metadata:
   name: guanyin-instance-manager
   namespace: guanyin-enterprise-instances
 rules:
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
   - apiGroups: [""]
     resources: ["services", "secrets", "configmaps"]
     verbs: ["get", "list", "create", "patch", "update", "delete"]

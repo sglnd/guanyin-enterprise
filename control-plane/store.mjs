@@ -116,6 +116,34 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
       created_by uuid NOT NULL REFERENCES users(id), created_at timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY(instance_id,mcp_server_id)
     );
+    ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS allowed_tools jsonb NOT NULL DEFAULT '[]';
+    ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS max_concurrency integer NOT NULL DEFAULT 8;
+    ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS requests_per_minute integer NOT NULL DEFAULT 120;
+    CREATE TABLE IF NOT EXISTS space_network_policies (
+      instance_id uuid PRIMARY KEY REFERENCES instances(id) ON DELETE CASCADE,
+      allowed_origins jsonb NOT NULL DEFAULT '[]', updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS mcp_gateway_tokens (
+      instance_id uuid PRIMARY KEY REFERENCES instances(id) ON DELETE CASCADE,
+      token_hash text NOT NULL UNIQUE
+    );
+    CREATE TABLE IF NOT EXISTS mcp_gateway_calls (
+      id bigserial PRIMARY KEY, instance_id uuid, server_id uuid, tool text NOT NULL DEFAULT '',
+      status integer NOT NULL, duration_ms bigint NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS mcp_gateway_calls_created ON mcp_gateway_calls(created_at);
+    CREATE OR REPLACE FUNCTION notify_mcp_gateway() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN PERFORM pg_notify('guanyin_mcp_config','changed'); RETURN NULL; END $$;
+    DROP TRIGGER IF EXISTS mcp_gateway_changed ON space_network_policies;
+    CREATE TRIGGER mcp_gateway_changed AFTER INSERT OR UPDATE OR DELETE ON space_network_policies FOR EACH STATEMENT EXECUTE FUNCTION notify_mcp_gateway();
+    DROP TRIGGER IF EXISTS mcp_gateway_changed ON mcp_servers;
+    CREATE TRIGGER mcp_gateway_changed AFTER INSERT OR UPDATE OR DELETE ON mcp_servers FOR EACH STATEMENT EXECUTE FUNCTION notify_mcp_gateway();
+    DROP TRIGGER IF EXISTS mcp_gateway_changed ON space_mcp_bindings;
+    CREATE TRIGGER mcp_gateway_changed AFTER INSERT OR UPDATE OR DELETE ON space_mcp_bindings FOR EACH STATEMENT EXECUTE FUNCTION notify_mcp_gateway();
+    DROP TRIGGER IF EXISTS mcp_gateway_changed ON mcp_gateway_tokens;
+    CREATE TRIGGER mcp_gateway_changed AFTER INSERT OR UPDATE OR DELETE ON mcp_gateway_tokens FOR EACH STATEMENT EXECUTE FUNCTION notify_mcp_gateway();
+    DROP TRIGGER IF EXISTS mcp_gateway_changed ON instances;
+    CREATE TRIGGER mcp_gateway_changed AFTER INSERT OR UPDATE OR DELETE ON instances FOR EACH STATEMENT EXECUTE FUNCTION notify_mcp_gateway();
     CREATE TABLE IF NOT EXISTS api_definitions (
       id uuid PRIMARY KEY, slug text NOT NULL UNIQUE, name text NOT NULL, description text NOT NULL DEFAULT '',
       instance_id uuid NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
@@ -173,6 +201,10 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
       default_provider_id uuid REFERENCES model_providers(id), default_model text,
       revision integer NOT NULL DEFAULT 1, sync_status text NOT NULL DEFAULT 'pending', synced_at timestamptz
     );
+    DROP TRIGGER IF EXISTS mcp_gateway_changed ON model_providers;
+    CREATE TRIGGER mcp_gateway_changed AFTER INSERT OR UPDATE OR DELETE ON model_providers FOR EACH STATEMENT EXECUTE FUNCTION notify_mcp_gateway();
+    DROP TRIGGER IF EXISTS mcp_gateway_changed ON space_model_configs;
+    CREATE TRIGGER mcp_gateway_changed AFTER INSERT OR UPDATE OR DELETE ON space_model_configs FOR EACH STATEMENT EXECUTE FUNCTION notify_mcp_gateway();
     CREATE INDEX IF NOT EXISTS instances_user_idx ON instances(user_id);
     CREATE INDEX IF NOT EXISTS instance_members_user_idx ON instance_members(user_id,instance_id);
     CREATE UNIQUE INDEX IF NOT EXISTS instance_members_one_owner_idx ON instance_members(instance_id) WHERE access_role='owner';
@@ -382,7 +414,7 @@ export async function removeInstanceMember(instanceId, userId) {
 }
 
 export async function listMcpServers() {
-  return (await pool.query(`SELECT m.id,m.name,m.server_name AS "serverName",m.description,m.transport,m.url,
+  return (await pool.query(`SELECT m.id,m.name,m.server_name AS "serverName",m.description,m.transport,m.url,m.allowed_tools AS "allowedTools",m.max_concurrency AS "maxConcurrency",m.requests_per_minute AS "requestsPerMinute",
     m.enabled,m.created_at AS "createdAt",m.updated_at AS "updatedAt",count(b.instance_id)::int AS "spaceCount",
     (m.headers <> '{}'::jsonb) AS "hasHeaders"
     FROM mcp_servers m LEFT JOIN space_mcp_bindings b ON b.mcp_server_id=m.id AND EXISTS (SELECT 1 FROM instances i WHERE i.id=b.instance_id AND i.deleted_at IS NULL AND i.status<>'deleting')
@@ -391,18 +423,18 @@ export async function listMcpServers() {
 
 export async function mcpServerById(id, includeHeaders = false) {
   const headers = includeHeaders ? ',m.headers' : `,(m.headers <> '{}'::jsonb) AS "hasHeaders"`
-  return (await pool.query(`SELECT m.id,m.name,m.server_name AS "serverName",m.description,m.transport,m.url,m.enabled,
+  return (await pool.query(`SELECT m.id,m.name,m.server_name AS "serverName",m.description,m.transport,m.url,m.allowed_tools AS "allowedTools",m.max_concurrency AS "maxConcurrency",m.requests_per_minute AS "requestsPerMinute",m.enabled,
     m.created_at AS "createdAt",m.updated_at AS "updatedAt"${headers} FROM mcp_servers m WHERE m.id=$1`, [id])).rows[0]
 }
 
 export async function createMcpServer(value) {
-  return (await pool.query(`INSERT INTO mcp_servers(id,name,server_name,description,transport,url,headers,enabled,created_by)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, [value.id,value.name,value.serverName,value.description,value.transport,value.url,value.headers,value.enabled,value.createdBy])).rows[0]
+  return (await pool.query(`INSERT INTO mcp_servers(id,name,server_name,description,transport,url,headers,enabled,created_by,allowed_tools,max_concurrency,requests_per_minute)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`, [value.id,value.name,value.serverName,value.description,value.transport,value.url,value.headers,value.enabled,value.createdBy,JSON.stringify(value.allowedTools),value.maxConcurrency,value.requestsPerMinute])).rows[0]
 }
 
 export async function updateMcpServer(id, value) {
   await pool.query(`UPDATE mcp_servers SET name=$2,server_name=$3,description=$4,transport=$5,url=$6,
-    headers=COALESCE($7,headers),enabled=$8,updated_at=now() WHERE id=$1`, [id,value.name,value.serverName,value.description,value.transport,value.url,value.headers,value.enabled])
+    headers=COALESCE($7,headers),enabled=$8,allowed_tools=$9,max_concurrency=$10,requests_per_minute=$11,updated_at=now() WHERE id=$1`, [id,value.name,value.serverName,value.description,value.transport,value.url,value.headers,value.enabled,JSON.stringify(value.allowedTools),value.maxConcurrency,value.requestsPerMinute])
   return mcpServerById(id)
 }
 
@@ -418,7 +450,7 @@ export async function listMcpSpaces(mcpServerId) {
 
 export async function listSpaceMcpBindings(instanceId, includeHeaders = false) {
   const headers = includeHeaders ? ',m.headers' : `,(m.headers <> '{}'::jsonb) AS "hasHeaders"`
-  return (await pool.query(`SELECT m.id,m.name,m.server_name AS "serverName",m.description,m.transport,m.url,m.enabled,
+  return (await pool.query(`SELECT m.id,m.name,m.server_name AS "serverName",m.description,m.transport,m.url,m.allowed_tools AS "allowedTools",m.max_concurrency AS "maxConcurrency",m.requests_per_minute AS "requestsPerMinute",m.enabled,
     b.created_at AS "connectedAt"${headers} FROM space_mcp_bindings b JOIN mcp_servers m ON m.id=b.mcp_server_id
     WHERE b.instance_id=$1 ORDER BY m.name`, [instanceId])).rows
 }
@@ -890,3 +922,20 @@ export async function listPendingModelSyncInstances() {
 export const recordModelUsage = (instance, events) => ingestUsage(pool, instance, events)
 export const modelUsage = params => queryUsage(pool, params)
 export const purgeModelUsage = () => pruneUsage(pool)
+
+export async function setMcpGatewayToken(instanceId, token) {
+  await pool.query(`INSERT INTO mcp_gateway_tokens(instance_id,token_hash) VALUES($1,$2)
+    ON CONFLICT(instance_id) DO UPDATE SET token_hash=excluded.token_hash WHERE mcp_gateway_tokens.token_hash<>excluded.token_hash`, [instanceId,createHash('sha256').update(token).digest('hex')])
+}
+export async function listMcpGatewayCalls() {
+  return (await pool.query(`SELECT c.*,i.name AS "instanceName",m.name AS "serverName" FROM mcp_gateway_calls c
+    LEFT JOIN instances i ON i.id=c.instance_id LEFT JOIN mcp_servers m ON m.id=c.server_id ORDER BY c.created_at DESC LIMIT 200`)).rows
+}
+
+export async function spaceNetworkPolicy(instanceId) {
+  return (await pool.query('SELECT allowed_origins AS "allowedOrigins" FROM space_network_policies WHERE instance_id=$1',[instanceId])).rows[0] || {allowedOrigins:[]}
+}
+export async function setSpaceNetworkPolicy(instanceId, origins) {
+  await pool.query(`INSERT INTO space_network_policies(instance_id,allowed_origins) VALUES($1,$2)
+    ON CONFLICT(instance_id) DO UPDATE SET allowed_origins=excluded.allowed_origins,updated_at=now()`,[instanceId,JSON.stringify(origins)])
+}

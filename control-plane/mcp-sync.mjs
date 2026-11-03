@@ -10,3 +10,12 @@ export function managedMcpConfigMatches(server, desired) {
     JSON.stringify(canonical(actual[key])) === JSON.stringify(canonical(value)))
     && JSON.stringify(canonical(actual.headers || {})) === JSON.stringify(canonical(desired.headers || {}))
 }
+
+// DSH managed IDs accept lowercase letters, digits and hyphens only.
+// Use the service UUID so display/server names and renames cannot invalidate it.
+export function gatewayMcpEntry(item, token, gatewayUrl) {
+  return { id: `guanyin-mcp-${item.id}`, config: {
+    serverName: item.serverName, transport: 'streamable-http', url: `${gatewayUrl.replace(/\/$/, '')}/mcp/${item.id}`,
+    headers: { Authorization: `Bearer ${token}` },
+  } }
+}

@@ -84,3 +84,25 @@ See `docs/dsh-rc3-adaptation.md` for the patch inventory and plugin evaluation. 
 ### 会话删除与配置页（rc3 gy.ent.6）
 
 会话操作菜单新增带二次确认的永久删除；普通和已归档会话均支持，运行中或存在关联依赖时拒绝。仅清理该会话的日志及索引，保留工作目录文件、共享附件、平台审计和用量记录。高级设置统一中文分类并隐藏项目介绍/外链。实现、升级边界与验证见 `docs/dsh-0.2.1-session-deletion.md`。
+
+## Mermaid 图表插件
+
+0.2.1 已接入 0.1.5 使用的 `dsh-mermaid-web 0.1.0`，使用固定的本地分发包，
+不依赖 CDN。新增 `patch-mermaid.mjs` 兼容 rc3 的代码语言与流式状态标记，
+并将全屏、适应窗口、关闭和源码入口中文化。企业插件原有 Mermaid 观察器已移除，
+避免同一图表渲染两次。支持缩放、全屏及源码查看，解析失败保留源码。
+
+全量构建与 overlay 构建均安装此插件；入口脚本会为已有 rc3 profile 补充 bundle，
+保留自定义插件、配置与会话。0.1.5 镜像不变。需重建并使用新空间镜像才能生效，
+此前导出的离线 ZIP 不会自动更新。
+
+可在新镜像内运行 `node /opt/dsh-runtime/mermaid-check.mjs` 验证
+（将仓库同名检查脚本只读挂载到该路径），覆盖 rc3 语言识别、流式等待、
+全屏、错误回退和卸载恢复。
+
+本次本机构建镜像：
+
+- `bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.7-mermaid-arm64`
+- `bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.7-mermaid-amd64`
+
+部署时使用匹配架构的新标签，原 `gy.ent.7` 标签及既有离线包保持原内容。

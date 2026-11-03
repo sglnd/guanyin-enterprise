@@ -84,3 +84,9 @@ node --check public/app.js
 ## 生产部署
 
 当前 Kubernetes manifest 是本地参考环境。详细的本地运行说明见 [本地部署与功能边界](docs/local-deployment.md)。生产部署前需要配置私有镜像仓库、TLS、外部 Secret、CSI 存储、NetworkPolicy、集群外备份、监控告警和恢复演练，详见 [生产就绪清单](docs/production-readiness.md)。
+
+## MCP 网关
+
+MCP 注册及空间绑定现支持独立 Go 网关：空间专属调用令牌、服务/工具白名单、限流、并发保护和调用记录。复用 PostgreSQL，通过内存授权快照处理调用，无需 Redis。部署和网络防绕过前提见 [MCP 网关部署说明](docs/mcp-gateway.md)。已有服务升级后工具默认不开放，需管理员明确填写白名单；网络隔离须在确认 CNI 能力和模型访问路径后启用。
+
+空间基础网络策略的自动创建、迁移、协调和部署开关见 [受管出站网络](docs/managed-egress.md)。

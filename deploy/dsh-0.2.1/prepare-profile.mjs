@@ -4,7 +4,7 @@ const profile = '/opt/dsh-seed/profiles/web'
 await rm(`${profile}/node_modules`, { recursive: true, force: true })
 await symlink(root, `${profile}/node_modules`)
 await writeFile(`${profile}/package.json`, JSON.stringify({ name: 'guanyin-enterprise-web-021', private: true, dsh: { profile: {
-  bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@changfenhuang/dsh-genui', 'dsh-context', '@michengai/dsh-skills-manager', '@weibaohui/dsh-file-share', '@guanyin/dsh-enterprise'], patchReload: 'live',
+  bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', '@changfenhuang/dsh-genui', 'dsh-context', 'dsh-mermaid-web', '@michengai/dsh-skills-manager', '@weibaohui/dsh-file-share', '@guanyin/dsh-enterprise'], patchReload: 'live',
 } } }, null, 2))
 await writeFile(`${profile}/cordis.patch.yml`, '[]\n', { mode: 0o600 })
 await writeFile('/opt/dsh-seed/.guanyin-release', 'dsh=0.2.1-rc.3\nprofile=guanyin-enterprise-021-v1\n')
