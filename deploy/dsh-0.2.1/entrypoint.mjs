@@ -49,7 +49,9 @@ const profileFile = join(home, 'profiles/web/package.json')
 const currentProfile = JSON.parse(await readFile(profileFile, 'utf8'))
 const bundles = currentProfile.dsh?.profile?.bundles
 if (!Array.isArray(bundles)) throw new Error('Invalid managed profile')
-const ordered = managedBundles(bundles, ['dsh-mermaid-web'])
+const workflowEnabled = process.env.GUANYIN_WORKFLOW_ENABLED === '1'
+const ordered = managedBundles(bundles.filter(name => workflowEnabled || name !== 'dsh-visual-workflow'),
+  workflowEnabled ? ['dsh-mermaid-web', 'dsh-visual-workflow'] : ['dsh-mermaid-web'])
 if (JSON.stringify(bundles) !== JSON.stringify(ordered)) {
   currentProfile.dsh.profile.bundles = ordered
   await writeFile(profileFile + '.order.tmp', JSON.stringify(currentProfile, null, 2), { mode: 0o600 })

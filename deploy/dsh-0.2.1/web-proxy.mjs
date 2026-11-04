@@ -3,6 +3,7 @@ import net from 'node:net'
 import { readFile, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import { saveWorkflowModels } from './workflow-policy.mjs'
 import { synchronizeModels } from './model-sync.mjs'
 
 const upstreamHost = '127.0.0.1'
@@ -164,7 +165,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== 'POST' || !isGuanyinRequest(req)) { res.writeHead(404).end(); return }
     try {
       const cookie = await dshSessionCookie()
-      const result = await synchronizeModels(await readJson(req, 8 * 1024 * 1024), async (method, args) => {
+      const payload = await readJson(req, 8 * 1024 * 1024)
+      const result = await synchronizeModels(payload, async (method, args) => {
         const body = JSON.stringify({ type: 'client-request', rpcId: randomUUID(), method, payload: { args } })
         const response = await upstreamRequest(`/api/${method}`, { method: 'POST', headers: {
           host: '127.0.0.1:18081', cookie, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body),
@@ -173,6 +175,7 @@ const server = http.createServer(async (req, res) => {
         if (response.status >= 300 || !data.result?.ok) throw new Error('DSH model settings RPC failed')
         return data.result.value
       })
+      if (process.env.GUANYIN_WORKFLOW_ENABLED === '1') await saveWorkflowModels(payload)
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       res.end(JSON.stringify({ ok: true, ...result }))
     } catch {

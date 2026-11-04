@@ -559,6 +559,7 @@ async function provision(instance) {
           { name: 'HTTPS_PROXY', valueFrom: { secretKeyRef: { name, key: 'mcpProxyUrl', optional: true } } },
           { name: 'HTTP_PROXY', valueFrom: { secretKeyRef: { name, key: 'mcpProxyUrl', optional: true } } },
           { name: 'NO_PROXY', value: '.svc,.svc.cluster.local,localhost,127.0.0.1' },
+          ...(instance.version.startsWith('0.2.1') && process.env.GUANYIN_WORKFLOW_ENABLED === '1' ? [{ name: 'GUANYIN_WORKFLOW_ENABLED', value: '1' }] : []),
           { name: 'DSH_HOME', value: '/data/dsh' }, { name: 'BANKOPS_WEB_PROXY', value: '1' },
           { name: 'DSH_BROWSER_AUTH_MODE', value: 'trusted-host' }, { name: 'DSH_TRUSTED_HOSTS', value: PUBLIC_HOSTS },
           { name: 'DSH_PERMISSION_MODE', value: DSH_PERMISSION_MODE },
