@@ -38,7 +38,57 @@ const after = `			const registerSlots = (scoped) => {
 			if (typeof ctx.inject === "function") ctx.inject(["slots"], registerSlots);
 			else registerSlots(ctx);`
 
-if (source.includes(after)) process.exit(0)
-if (source.split(before).length !== 2) throw new Error('Expected Visual Workflow v0.10.3 client registration')
-source = source.replace(before, after)
+function replace(before, after) {
+  if (source.includes(after)) return
+  if (source.split(before).length !== 2) throw new Error('Expected Visual Workflow v0.10.3 client target')
+  source = source.replace(before, after)
+}
+
+replace(before, after)
+replace('const workspacePicker = (0, react.useMemo)(() => createWorkspacePicker(ctx), [ctx]);', `const slots = ctx.get?.("slots");
+			const directoryEntry = () => slots?.entries("sidebar.workspaces.directoryFlow")?.[0];
+			const [directoryRequest, setDirectoryRequest] = (0, react.useState)(null);
+			const pendingDirectory = (0, react.useRef)(null);
+			const settleDirectory = (value, error) => {
+				const pending = pendingDirectory.current;
+				pendingDirectory.current = null;
+				setDirectoryRequest(null);
+				if (error) pending?.reject(error);
+				else pending?.resolve(value);
+			};
+			(0, react.useEffect)(() => () => {
+				pendingDirectory.current?.resolve(null);
+				pendingDirectory.current = null;
+			}, []);
+			const workspacePicker = {
+				available: () => Boolean(directoryEntry()?.component),
+				pick: () => new Promise((resolve, reject) => {
+					const entry = directoryEntry();
+					if (!entry?.component) return reject(new Error("网页目录浏览器尚未就绪"));
+					if (pendingDirectory.current) return resolve(null);
+					pendingDirectory.current = { resolve, reject };
+					setDirectoryRequest(entry);
+				})
+			};`)
+replace(`return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Studio, {
+				language: detectLanguage(ctx.get?.("locale") ?? ctx.locale),
+				t,
+				sessionId,
+				onRunImmersive: shrinkOfficialSidebarIfFullscreen,
+				workspacePicker,
+				filePathResolver
+			});`, `return (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+				(0, react_jsx_runtime.jsx)(Studio, {
+					language: detectLanguage(ctx.get?.("locale") ?? ctx.locale),
+					t, sessionId, onRunImmersive: shrinkOfficialSidebarIfFullscreen, workspacePicker, filePathResolver
+				}),
+				directoryRequest && (0, react_jsx_runtime.jsx)(directoryRequest.component, {
+					...directoryRequest.options.inject(),
+					open: true,
+					busy: false,
+					onPicked: path => settleDirectory(path),
+					onCancel: () => settleDirectory(null),
+					onError: message => settleDirectory(null, new Error(message))
+				})
+			] });`)
 await writeFile(file, source)
