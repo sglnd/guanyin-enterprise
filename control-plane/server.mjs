@@ -282,9 +282,9 @@ async function removeMcpEntries(instance, id) {
 
 const deletingSpaces = new Set()
 const mcpSyncQueues = new Map()
-function applySpaceMcp(instance) {
+function applySpaceMcp(instance, refreshServerId) {
   const previous = mcpSyncQueues.get(instance.id) || Promise.resolve()
-  const next = previous.catch(() => {}).then(() => reconcileSpaceMcp(instance))
+  const next = previous.catch(() => {}).then(() => reconcileSpaceMcp(instance, refreshServerId))
   mcpSyncQueues.set(instance.id, next)
   void next.finally(() => {
     if (mcpSyncQueues.get(instance.id) === next) mcpSyncQueues.delete(instance.id)
@@ -354,7 +354,7 @@ async function waitForMcpEntry(instance, entry) {
   throw new Error(`MCP ${entry.config.serverName} 配置已保存，但 DSH 重载未完成，请稍后重试`)
 }
 
-async function reconcileSpaceMcp(instance) {
+async function reconcileSpaceMcp(instance, refreshServerId) {
   if (!await store.instanceById(instance.id)) throw new Error('空间不存在或正在删除')
   const name = mcpResourceName(instance)
   const labels = { 'app.kubernetes.io/name': 'dsh', 'guanyin.io/instance': instance.id, 'guanyin.io/config': 'mcp' }
@@ -383,7 +383,7 @@ async function reconcileSpaceMcp(instance) {
   for (const entry of desired.values()) {
     const existing = managed.filter(item => item.id === entry.id)
     const unchanged = existing.length === 1 && managedMcpConfigMatches(existing[0], entry.config)
-    if (unchanged) continue
+    if (unchanged && entry.id !== `guanyin-mcp-${refreshServerId}` && entry.id !== `guanyin-mcp-${bindings.find(item => item.id === refreshServerId)?.serverName}`) continue
     if (existing.length) await removeMcpEntries(instance, entry.id)
     await callMcpManager(instance, 'add', entry)
     await waitForMcpEntry(instance, entry)
@@ -926,6 +926,12 @@ async function api(req, res, path) {
     return sendJson(res, 202, { instance: result })
   }
   const canManageMcp = user.role === 'platform_admin' || user.mcpAdmin
+  const mcpSyncStatus = path.match(/^\/api\/mcp-sync\/([0-9a-f-]{36})$/i)
+  if (mcpSyncStatus && req.method === 'GET') {
+    if (!canManageMcp) return sendJson(res, 403, { error: '需要 MCP 管理员权限' })
+    const sync = await store.mcpSyncJob(mcpSyncStatus[1])
+    return sync ? sendJson(res, 200, sync) : sendJson(res, 404, { error: '同步记录已过期，请查看空间状态后重试' })
+  }
   if (path === '/api/mcp-calls' && req.method === 'GET') {
     if (!canManageMcp) return sendJson(res, 403, { error: '需要 MCP 管理员权限' })
     return sendJson(res, 200, { calls: await store.listMcpGatewayCalls() })
@@ -959,12 +965,33 @@ async function api(req, res, path) {
     const current = await store.mcpServerById(mcpServer[1], true)
     if (!current) return sendJson(res, 404, { error: 'MCP 服务不存在' })
     try {
-      const value = mcpInput(await bodyJson(req), true)
+      const input = await bodyJson(req)
+      const value = mcpInput({ allowedTools: current.allowedTools, maxConcurrency: current.maxConcurrency, requestsPerMinute: current.requestsPerMinute, ...input }, true)
       const updated = await store.updateMcpServer(current.id, value)
       const spaces = await store.listMcpSpaces(current.id)
-      await Promise.all(spaces.map(applySpaceMcp))
+
       await audit({ actorUserId: user.id, action: 'mcp_update', details: { mcpServerId: current.id, serverName: value.serverName, affectedSpaces: spaces.length, ip: clientIp(req) } })
-      return sendJson(res, 200, { server: updated })
+      const syncId = randomUUID()
+      const sync = { id: syncId, status: 'pending', name: updated.name, failedSpaces: [], pendingSpaces: 0 }
+      await store.createMcpSyncJob(sync)
+      void (async () => {
+        // Let the gateway consume the new policy snapshot before reconnecting clients.
+        if (MCP_GATEWAY_URL) await delay(5500)
+        await Promise.all(spaces.map(async space => {
+          try {
+            if (space.status === 'stopped') { sync.pendingSpaces++; return }
+            await applySpaceMcp(space, current.id)
+          } catch {
+            sync.failedSpaces.push(space.name || space.id)
+          }
+        }))
+        sync.status = sync.failedSpaces.length ? 'error' : 'completed'
+        await store.finishMcpSyncJob(sync)
+      })().catch(async () => {
+        sync.status = 'error'
+        await store.finishMcpSyncJob(sync).catch(() => console.error('MCP 同步结果记录失败'))
+      })
+      return sendJson(res, 202, { server: updated, syncId })
     } catch (error) {
       if (error.code === '23505') return sendJson(res, 400, { error: 'serverName 已存在' })
       return sendJson(res, 400, { error: error.message })
@@ -1390,7 +1417,7 @@ const server = http.createServer(async (req, res) => {
       || /^\/api\/instances\/[^/]+\/mcp-bindings(?:\/[^/]+)?$/.test(path)
       || /^\/api\/instances\/[^/]+\/api-credentials(?:\/[^/]+(?:\/grants)?)?$/.test(path)
       || /^\/api\/instances\/[^/]+\/network-policy$/.test(path)
-      || path.startsWith('/api/mcp-servers') || path === '/api/mcp-calls'
+      || path.startsWith('/api/mcp-sync/') || path.startsWith('/api/mcp-servers') || path === '/api/mcp-calls'
       || path.startsWith('/api/api-definitions') || path.startsWith('/api/api-runs/') || path.startsWith('/api/api-builder/') || path === '/api/api-catalog'
       || path.startsWith('/api/admin/')
     if (controlApi) return await api(req, res, path)

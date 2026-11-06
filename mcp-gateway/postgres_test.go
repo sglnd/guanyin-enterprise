@@ -55,7 +55,7 @@ func TestPostgresSnapshotNotificationAndAudit(t *testing.T) {
 	if _, e = conn.Exec(ctx, "LISTEN guanyin_mcp_config"); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = pool.Exec(ctx, `UPDATE mcp_servers SET allowed_tools='[]' WHERE id=$1`, server); e != nil {
+	if _, e = pool.Exec(ctx, `UPDATE mcp_servers SET allowed_tools='["other"]' WHERE id=$1`, server); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = conn.Conn().WaitForNotification(ctx); e != nil {

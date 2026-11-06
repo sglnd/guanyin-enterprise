@@ -91,6 +91,9 @@ func (g *gateway) acquire(k string, p policy) bool {
 }
 func (g *gateway) release(k string) { g.mu.Lock(); defer g.mu.Unlock(); g.limits[k].Active-- }
 func allowed(p policy, name string) bool {
+	if len(p.Tools) == 0 {
+		return true
+	}
 	for _, v := range p.Tools {
 		if v == name {
 			return true
@@ -276,13 +279,7 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Discovery is bounded and filtered for JSON and SSE responses alike.
 	if msg.Method == "tools/list" && resp.StatusCode == 200 {
-		data, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
-		if err != nil || len(data) > 4<<20 {
-			status = 502
-			fail(w, status, "discovery_too_large")
-			return
-		}
-		data, err = filterDiscovery(data, resp.Header.Get("Content-Type"), p)
+		data, err := readDiscoveryResponse(resp.Body, resp.Header.Get("Content-Type"), msg.ID, p)
 		if err != nil {
 			status = 502
 			fail(w, status, "invalid_discovery")
@@ -345,6 +342,58 @@ func filterJSON(data []byte, p policy) ([]byte, error) {
 	}
 	return json.Marshal(v)
 }
+
+// Streamable HTTP servers may keep SSE open after the RPC response.
+// Return as soon as this request's response arrives, without waiting for EOF.
+func readDiscoveryResponse(body io.Reader, contentType string, requestID json.RawMessage, p policy) ([]byte, error) {
+	const maxBytes = 4 << 20
+	if !strings.Contains(contentType, "text/event-stream") {
+		data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+		if err != nil || len(data) > maxBytes {
+			return nil, errors.New("invalid or oversized discovery")
+		}
+		return filterJSON(data, p)
+	}
+	scanner := bufio.NewScanner(io.LimitReader(body, maxBytes+1))
+	scanner.Buffer(make([]byte, 4096), maxBytes)
+	var frame bytes.Buffer
+	var payload []string
+	total := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		total += len(line) + 1
+		if total > maxBytes {
+			return nil, errors.New("oversized discovery")
+		}
+		frame.WriteString(line + "\n")
+		if strings.HasPrefix(line, "data:") {
+			payload = append(payload, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+		if line != "" {
+			continue
+		}
+		if len(payload) > 0 {
+			var response struct {
+				ID     json.RawMessage `json:"id"`
+				Result json.RawMessage `json:"result"`
+				Error  json.RawMessage `json:"error"`
+			}
+			if err := json.Unmarshal([]byte(strings.Join(payload, "\n")), &response); err != nil {
+				return nil, err
+			}
+			if bytes.Equal(response.ID, requestID) && (len(response.Result) > 0 || len(response.Error) > 0) {
+				return filterDiscovery(frame.Bytes(), contentType, p)
+			}
+		}
+		frame.Reset()
+		payload = nil
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("discovery ended without matching response")
+}
+
 func filterDiscovery(data []byte, ct string, p policy) ([]byte, error) {
 	if !strings.Contains(ct, "text/event-stream") {
 		return filterJSON(data, p)

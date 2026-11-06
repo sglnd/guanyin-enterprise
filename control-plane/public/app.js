@@ -43,7 +43,8 @@ async function toggleApiCredential(button){const enabled=button.dataset.enabled!
 async function retireApi(button){const item=apiDefinitions.find(x=>x.id===button.dataset.id);if(!await confirmAction('下线这个接口？',`“${item.name}”下线后，现有 API Key 将不能再发起新调用，历史文档和运行记录仍会保留。`,'下线接口',true))return;await run(button,async()=>{await request(`/api/api-definitions/${item.id}/retire`,{method:'POST'});toast('接口已下线');await loadApiDefinitions()})}
 async function openApiRuns(id){const item=apiDefinitions.find(x=>x.id===id);$('#api-runs-name').textContent=item?.name||'运行记录';$('#api-runs-list').innerHTML='<div class="loading">正在读取运行记录…</div>';$('#api-run-events').classList.add('hidden');$('#api-runs-dialog').showModal();try{const runs=(await request(`/api/api-definitions/${id}/runs`)).runs;$('#api-runs-list').innerHTML=runs.length?runs.map(x=>`<div class="mcp-space-row"><span><strong>${esc(x.status)}</strong><small>${new Date(x.queuedAt).toLocaleString()} · ${esc(x.credentialName||x.keyPrefix||'')}</small></span><span>${x.completedAt?new Date(x.completedAt).toLocaleTimeString():'执行中'}</span><button class="api-run-detail" data-id="${x.id}">事件</button></div>`).join(''):'<div class="empty compact">暂无运行记录。</div>';$$('.api-run-detail').forEach(b=>b.onclick=()=>openApiRunEvents(b.dataset.id))}catch(e){$('#api-runs-list').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
 async function openApiRunEvents(id){const root=$('#api-run-events');root.classList.remove('hidden');root.innerHTML='<div class="loading">正在读取事件…</div>';try{const events=(await request(`/api/api-runs/${id}/events`)).events;root.innerHTML=events.map(x=>`<div class="audit-item"><div><strong>${esc(x.eventType)}</strong><time>#${x.sequence} · ${new Date(x.createdAt).toLocaleTimeString()}</time></div><p>${esc(JSON.stringify(x.data))}</p></div>`).join('')||'<div class="empty compact">暂无事件。</div>'}catch(e){root.innerHTML=`<div class="error">${esc(e.message)}</div>`}}
-function openMcpForm(id){const item=mcpServers.find(x=>x.id===id),f=$('#mcp-form');f.reset();f.dataset.id=id||'';$('#mcp-dialog-title').textContent=item?'编辑 MCP':'新增 MCP';$('#mcp-discovered').textContent='';if(item){f.elements.name.value=item.name;f.elements.serverName.value=item.serverName;f.elements.url.value=item.url;f.elements.description.value=item.description||'';f.elements.allowedTools.value=(item.allowedTools||[]).join('\n');f.elements.maxConcurrency.value=item.maxConcurrency||8;f.elements.requestsPerMinute.value=item.requestsPerMinute||120;f.elements.headers.value='';f.elements.headers.placeholder=item.hasHeaders?'已保存敏感请求头；留空则保持不变':'{"Authorization":"Bearer ..."}';f.elements.enabled.checked=item.enabled}else f.elements.enabled.checked=true;f.querySelector('.form-message').textContent='';$('#mcp-dialog').showModal()}
+let mcpFormRevision = 0;
+function openMcpForm(id){mcpFormRevision++;const item=mcpServers.find(x=>x.id===id),f=$('#mcp-form');f.reset();f.dataset.id=id||'';delete f.dataset.saving;f.querySelector('button[type=submit]').disabled=false;$('#mcp-dialog-title').textContent=item?'编辑 MCP':'新增 MCP';$('#mcp-discovered').textContent='';if(item){f.elements.name.value=item.name;f.elements.serverName.value=item.serverName;f.elements.url.value=item.url;f.elements.description.value=item.description||'';f.elements.allowedTools.value=(item.allowedTools||[]).join('\n');f.elements.maxConcurrency.value=item.maxConcurrency||8;f.elements.requestsPerMinute.value=item.requestsPerMinute||120;f.elements.headers.value='';f.elements.headers.placeholder=item.hasHeaders?'已保存敏感请求头；留空则保持不变':'{"Authorization":"Bearer ..."}';f.elements.enabled.checked=item.enabled}else f.elements.enabled.checked=true;f.querySelector('.form-message').textContent='';$('#mcp-dialog').showModal()}
 async function openMcpSpaces(id){const item=mcpServers.find(x=>x.id===id);$('#mcp-spaces-name').textContent=item?.name||'MCP';$('#mcp-space-list').innerHTML='<div class="loading">正在读取接入情况…</div>';$('#mcp-spaces-dialog').showModal();try{const r=await request(`/api/mcp-servers/${id}/spaces`);$('#mcp-space-list').innerHTML=r.spaces.length?r.spaces.map(x=>`<div class="mcp-space-row"><span><strong>${esc(x.name)}</strong><small>${esc(x.tenant)} · 核心 ${esc(x.version)}</small></span><span class="status ${esc(x.status)}">${esc(statusName[x.status]||x.status)}</span><time>${new Date(x.connectedAt).toLocaleString()}</time></div>`).join(''):'<div class="empty compact">尚未有空间接入。</div>'}catch(e){$('#mcp-space-list').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
 async function openSpaceMcp(id){await openSpace(id,'mcp')}
 async function renderSpaceMcp(){const spaceId=selectedSpace.id;try{const current=(await request(`/api/instances/${spaceId}/mcp-bindings`)).bindings,ids=new Set(current.map(x=>x.id)),available=mcpServers.filter(x=>x.enabled||ids.has(x.id));if(selectedSpace?.id!==spaceId)return;$('#space-mcp-list').innerHTML=available.length?available.map(x=>`<div class="mcp-space-row"><span><strong>${esc(x.name)}</strong><small>${esc(x.serverName)} · ${esc(x.url)}</small></span><span class="pill ${ids.has(x.id)?'':'disabled'}">${ids.has(x.id)?'已接入':'未接入'}</span><button ${mcpCanManage?'':'disabled'} class="${ids.has(x.id)?'secondary disconnect-mcp':'primary connect-mcp'}" data-id="${x.id}">${ids.has(x.id)?'取消接入':'接入空间'}</button></div>`).join(''):'<div class="empty compact">暂无可接入的 MCP 服务。</div>';$$('.connect-mcp').forEach(b=>b.onclick=()=>changeSpaceMcp(b,true));$$('.disconnect-mcp').forEach(b=>b.onclick=()=>changeSpaceMcp(b,false))}catch(e){$('#space-mcp-list').innerHTML=`<div class="error">${esc(e.message)}</div>`}}
@@ -136,7 +137,58 @@ $('#user-form').onsubmit=e=>{e.preventDefault();submitForm(e.target,'/api/admin/
 $('#space-settings-form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit]');b.disabled=true;try{selectedSpace=(await request(`/api/admin/instances/${selectedSpace.id}`,{method:'PATCH',body:JSON.stringify(Object.fromEntries(new FormData(f)))})).instance;await loadAdminInstances();$('#space-dialog-name').textContent=selectedSpace.name;$('#space-settings-message').textContent='设置已保存并立即生效';toast('空间设置已保存')}catch(x){toast(x.message,'error')}finally{b.disabled=false}}
 $('#space-member-form').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button[type=submit]')||e.target.querySelector('button');if(b)b.disabled=true;try{await request(`/api/admin/instances/${selectedSpace.id}/members`,{method:'PUT',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});await Promise.all([loadMembers(),loadAdminInstances(),loadInstances()]);toast('成员权限已更新')}catch(x){toast(x.message,'error')}finally{if(b)b.disabled=false}}
 $('#edit-user-form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit]');b.disabled=true;try{const body=Object.fromEntries(new FormData(f));body.enabled=f.elements.enabled.checked;body.mcpAdmin=f.elements.mcpAdmin.checked;body.apiAdmin=f.elements.apiAdmin.checked;await request(`/api/admin/users/${f.dataset.id}`,{method:'PATCH',body:JSON.stringify(body)});$('#edit-user-dialog').close();await loadOverview();toast('用户信息已更新')}catch(x){$('#edit-user-message').textContent=x.message}finally{b.disabled=false}}
-$('#mcp-form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit]'),id=f.dataset.id;f.querySelector('.form-message').textContent='';b.disabled=true;try{const body=Object.fromEntries(new FormData(f));body.enabled=f.elements.enabled.checked;if(id&&!body.headers.trim())delete body.headers;await request(id?`/api/mcp-servers/${id}`:'/api/mcp-servers',{method:id?'PATCH':'POST',body:JSON.stringify(body)});$('#mcp-dialog').close();await loadMcpServers();toast(id?'MCP 已更新':'MCP 已新增')}catch(x){f.querySelector('.form-message').textContent=x.message}finally{b.disabled=false}}
+async function watchMcpSave(syncId, name) {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 2000))
+    try {
+      const sync = await request(`/api/mcp-sync/${syncId}`)
+      if (sync.status === 'pending') continue
+      if (sync.status === 'error') {
+        toast(`${name} 配置已保存，部分空间同步失败：${sync.failedSpaces.join('、') || '请稍后重试同步'}`, 'error')
+      } else {
+        toast(`${name} 同步完成${sync.pendingSpaces ? '，休眠空间将在下次启动时应用' : ''}`)
+      }
+      return
+    } catch {
+      toast(`${name} 配置已保存，暂时无法查询同步结果`, 'error')
+      return
+    }
+  }
+  toast(`${name} 配置已保存，同步仍在进行，请稍后检查空间`)
+}
+$('#mcp-form').onsubmit = async event => {
+  event.preventDefault()
+  const form = event.target
+  if (form.dataset.saving) return
+  const revision = mcpFormRevision
+  const button = form.querySelector('button[type=submit]')
+  const id = form.dataset.id
+  const body = Object.fromEntries(new FormData(form))
+  const name = body.name
+  body.enabled = form.elements.enabled.checked
+  if (id && !body.headers.trim()) delete body.headers
+  form.dataset.saving = 'true'
+  button.disabled = true
+  form.querySelector('.form-message').textContent = '正在保存…'
+  try {
+    const result = await request(id ? `/api/mcp-servers/${id}` : '/api/mcp-servers', {
+      method: id ? 'PATCH' : 'POST', body: JSON.stringify(body),
+    })
+    if (revision === mcpFormRevision) $('#mcp-dialog').close()
+    toast(`${name} 已保存${result.syncId ? '，正在后台同步空间' : ''}`)
+    if (result.syncId) void watchMcpSave(result.syncId, name)
+    try { await loadMcpServers() }
+    catch { toast(`${name} 已保存，列表刷新失败，请点击刷新`, 'error') }
+  } catch (error) {
+    if (revision === mcpFormRevision) form.querySelector('.form-message').textContent = error.message
+    else toast(`${name} 保存失败：${error.message}`, 'error')
+  } finally {
+    if (revision === mcpFormRevision) {
+      delete form.dataset.saving
+      button.disabled = false
+    }
+  }
+}
 $('#api-form').elements.instanceId.onchange=syncApiOwners
 $('#api-ai-generate').onclick=generateApiSuggestion
 $('#api-form').onsubmit=async e=>{e.preventDefault();const f=e.target,b=f.querySelector('button[type=submit]'),id=f.dataset.id;b.disabled=true;f.querySelector('.form-message').textContent='';try{const body=Object.fromEntries(new FormData(f));await request(id?`/api/api-definitions/${id}`:'/api/api-definitions',{method:id?'PATCH':'POST',body:JSON.stringify(body)});$('#api-dialog').close();await loadApiDefinitions();toast(id?'接口草稿已更新':'接口草稿已创建')}catch(x){f.querySelector('.form-message').textContent=x.message}finally{b.disabled=false}}
@@ -205,7 +257,23 @@ setInterval(async()=>{
   }catch{}finally{modelStatusRefreshing=false}
 },15_000);
 
-$('#mcp-discover').onclick=async()=>{const f=$('#mcp-form'),out=$('#mcp-discovered');out.textContent='正在检测…';try{const r=await request('/api/mcp-servers/discover',{method:'POST',body:JSON.stringify({id:f.dataset.id||undefined,url:f.elements.url.value,headers:f.elements.headers.value})});out.textContent='可用工具：'+r.tools.map(x=>x.name).join('、')+(r.hasMore?'（还有更多工具，请参考服务文档）':'')+'。请将需要开放的名称填入白名单，多个名称用换行、空格、逗号或顿号分隔。'}catch(e){out.textContent=e.message}}
+$('#mcp-discover').onclick = async () => {
+  const form = $('#mcp-form'), output = $('#mcp-discovered')
+  const revision = mcpFormRevision
+  output.textContent = '正在检测…'
+  try {
+    const result = await request('/api/mcp-servers/discover', {
+      method: 'POST', body: JSON.stringify({
+        id: form.dataset.id || undefined, url: form.elements.url.value, headers: form.elements.headers.value,
+      }),
+    })
+    if (revision !== mcpFormRevision) return
+    output.textContent = '可用工具：' + result.tools.map(tool => tool.name).join('、') +
+      (result.hasMore ? '（还有更多工具）' : '') + '。白名单留空开放全部；填写后仅开放列出的工具。'
+  } catch (error) {
+    if (revision === mcpFormRevision) output.textContent = error.message
+  }
+}
 const callsButton=document.createElement('button');callsButton.textContent='调用记录';$('#mcp-refresh').after(callsButton);callsButton.onclick=async()=>{try{const {calls}=await request('/api/mcp-calls');$('#mcp-calls-list').innerHTML=calls.length?calls.map(x=>`<div class="mcp-space-row"><span>${esc(x.instanceName||'')} · ${esc(x.serverName||'')}<small>${esc(x.tool||'协议请求')} · ${new Date(x.created_at).toLocaleString()}</small></span><span>${x.status} · ${x.duration_ms}ms</span></div>`).join(''):'暂无调用记录';$('#mcp-calls-dialog').showModal()}catch(e){toast(e.message,'error')}}
 
 async function loadSpaceNetwork(){const f=$('#space-network-form');f.querySelector('.form-message').textContent='正在读取…';try{const r=await request(`/api/instances/${selectedSpace.id}/network-policy`);$('#space-network-isolation').textContent=(r.isolationStatus?.ready?'网络隔离：':'网络隔离尚未确认：')+(r.isolationStatus?.message||'请联系平台管理员确认部署状态');f.elements.allowedOrigins.value=r.allowedOrigins.join('\n');f.elements.allowedOrigins.disabled=!r.canManage;f.querySelector('button[type=submit]').disabled=!r.canManage;f.querySelector('.form-message').textContent=''}catch(e){f.querySelector('.form-message').textContent=e.message}}

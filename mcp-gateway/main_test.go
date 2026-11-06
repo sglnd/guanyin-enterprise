@@ -131,3 +131,56 @@ func TestModernDiscoveryTriggersLegacyNegotiation(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+// A tools/list response can finish while its upstream SSE connection stays open.
+func TestDiscoveryDoesNotWaitForSSEClose(t *testing.T) {
+	release := make(chan struct{})
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, ": keepalive\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{\"tools\":[]}}\n\n")
+		io.WriteString(w, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"read\"},{\"name\":\"delete\"}]}}\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer up.Close()
+	defer close(release)
+	g := newGateway()
+	g.state.Store(&snapshot{At: time.Now(), Tokens: map[string]string{digest("a"): "space-a"}, Policies: map[string]policy{
+		key("space-a", "crm"): {Space: "space-a", Server: "crm", URL: up.URL, Tools: []string{"read"}, Concurrency: 1, RPM: 10},
+	}})
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- request(g, "a", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, "") }()
+	select {
+	case w := <-done:
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "read") || strings.Contains(w.Body.String(), "delete") || strings.Contains(w.Body.String(), "\"id\":99") {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("tools/list waited for upstream EOF")
+	}
+}
+
+func TestEmptyToolsAllowsAllAndExplicitListRestricts(t *testing.T) {
+	g, _ := fixture(t)
+	state := g.state.Load()
+	p := state.Policies[key("space-a", "crm")]
+	p.Tools = nil
+	state.Policies[key("space-a", "crm")] = p
+	w := request(g, "a", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "delete") {
+		t.Fatal("empty whitelist should expose all upstream tools", w.Code, w.Body.String())
+	}
+	w = request(g, "a", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete"}}`, "")
+	if w.Code != 200 {
+		t.Fatal("empty whitelist blocked a tool", w.Code)
+	}
+	p.Tools = []string{"read"}
+	state.Policies[key("space-a", "crm")] = p
+	w = request(g, "a", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete"}}`, "")
+	if w.Code != 403 {
+		t.Fatal("explicit whitelist must restrict calls", w.Code)
+	}
+}

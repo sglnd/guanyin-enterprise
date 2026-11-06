@@ -116,6 +116,9 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
       created_by uuid NOT NULL REFERENCES users(id), created_at timestamptz NOT NULL DEFAULT now(),
       PRIMARY KEY(instance_id,mcp_server_id)
     );
+    CREATE TABLE IF NOT EXISTS mcp_sync_jobs (
+      id uuid PRIMARY KEY, result jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now()
+    );
     ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS allowed_tools jsonb NOT NULL DEFAULT '[]';
     ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS max_concurrency integer NOT NULL DEFAULT 8;
     ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS requests_per_minute integer NOT NULL DEFAULT 120;
@@ -938,4 +941,16 @@ export async function spaceNetworkPolicy(instanceId) {
 export async function setSpaceNetworkPolicy(instanceId, origins) {
   await pool.query(`INSERT INTO space_network_policies(instance_id,allowed_origins) VALUES($1,$2)
     ON CONFLICT(instance_id) DO UPDATE SET allowed_origins=excluded.allowed_origins,updated_at=now()`,[instanceId,JSON.stringify(origins)])
+}
+
+
+export async function createMcpSyncJob(result) {
+  await pool.query("DELETE FROM mcp_sync_jobs WHERE created_at < now() - interval '1 day'")
+  await pool.query('INSERT INTO mcp_sync_jobs(id,result) VALUES($1,$2)', [result.id, JSON.stringify(result)])
+}
+export async function finishMcpSyncJob(result) {
+  await pool.query('UPDATE mcp_sync_jobs SET result=$2 WHERE id=$1', [result.id, JSON.stringify(result)])
+}
+export async function mcpSyncJob(id) {
+  return (await pool.query('SELECT result FROM mcp_sync_jobs WHERE id=$1', [id])).rows[0]?.result
 }
