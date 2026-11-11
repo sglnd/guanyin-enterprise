@@ -23,8 +23,8 @@ import { auditSessionDelete, SessionDeleteAuditError } from './session-delete-au
 const PORT = Number(process.env.PORT || 8080)
 const PUBLIC_DIR = process.env.PUBLIC_DIR || '/app/public'
 const NAMESPACE = process.env.DSH_NAMESPACE || 'guanyin-enterprise-instances'
-const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.8-arm64'
-const DSH_VERSION = process.env.DSH_VERSION || '0.1.5-rc.2-gy.ent.8'
+const DSH_IMAGE = process.env.DSH_IMAGE || 'bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.7-arm64'
+const DSH_VERSION = process.env.DSH_VERSION || '0.2.1-rc.3-gy.ent.7'
 const DSH_VERSIONS = runtimeVersions({ defaultVersion: DSH_VERSION, defaultImage: DSH_IMAGE, additional: process.env.DSH_ADDITIONAL_VERSIONS })
 const DSH_IMAGE_PULL_POLICY = process.env.DSH_IMAGE_PULL_POLICY || 'IfNotPresent'
 const DSH_STORAGE_CLASS = process.env.DSH_STORAGE_CLASS || ''

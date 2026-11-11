@@ -42,28 +42,27 @@ type usage struct {
 	Active, Count int
 	Window        time.Time
 }
-type session struct {
-	Owner   string
-	Expires time.Time
-}
 type call struct {
 	Space, Server, Tool string
 	Status              int
 	Duration            int64
 }
 type gateway struct {
-	state    atomic.Pointer[snapshot]
-	mu       sync.Mutex
-	limits   map[string]*usage
-	sessions map[string]session
-	client   *http.Client
-	audit    chan call
+	state        atomic.Pointer[snapshot]
+	mu           sync.Mutex
+	adoptMu      sync.Mutex
+	createMu     sync.Mutex
+	limits       map[string]*usage
+	sessions     map[string]*session
+	sessionStore sessionStore
+	client       *http.Client
+	audit        chan call
 }
 
 func key(space, server string) string { return space + "/" + server }
 func digest(s string) string          { b := sha256.Sum256([]byte(s)); return hex.EncodeToString(b[:]) }
 func newGateway() *gateway {
-	return &gateway{limits: map[string]*usage{}, sessions: map[string]session{}, audit: make(chan call, 4096), client: &http.Client{Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 64, MaxConnsPerHost: 256, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 30 * time.Second}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	return &gateway{limits: map[string]*usage{}, sessions: map[string]*session{}, audit: make(chan call, 4096), client: &http.Client{Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 64, MaxConnsPerHost: 256, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 30 * time.Second}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 func (g *gateway) fresh() bool {
 	s := g.state.Load()
@@ -202,22 +201,6 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(w, status, "method_not_allowed")
 		return
 	}
-	sid := r.Header.Get("Mcp-Session-Id")
-	if sid != "" {
-		g.mu.Lock()
-		entry, exists := g.sessions[server+"/"+sid]
-		g.mu.Unlock()
-		if !exists || entry.Owner != k || time.Now().After(entry.Expires) {
-			status = 404
-			fail(w, status, "unknown_session")
-			return
-		}
-	}
-	if (r.Method == "GET" || r.Method == "DELETE") && sid == "" {
-		status = 400
-		fail(w, status, "session_required")
-		return
-	}
 	if !g.acquire(k, p) {
 		status = 429
 		fail(w, status, "space_limit_exceeded")
@@ -226,56 +209,22 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer g.release(k)
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
-	up, err := http.NewRequestWithContext(ctx, r.Method, p.URL, bytes.NewReader(body))
+	resp, err := g.forwardSession(ctx, r, p, k, body, msg)
 	if err != nil {
 		status = 502
-		fail(w, status, "invalid_upstream")
-		return
-	}
-	for _, h := range []string{"Content-Type", "Accept", "Mcp-Session-Id", "MCP-Protocol-Version", "Last-Event-ID"} {
-		if v := r.Header.Get(h); v != "" {
-			up.Header.Set(h, v)
+		var failure *sessionFailure
+		message := "session_recovery_failed"
+		if errors.As(err, &failure) {
+			status = failure.status
+			message = failure.message
 		}
-	}
-	// Never forward caller cookies, authorization, identity or arbitrary headers.
-	for h, v := range p.Headers {
-		up.Header.Set(h, v)
-	}
-	resp, err := g.client.Do(up)
-	if err != nil {
-		status = 502
-		fail(w, status, "upstream_unavailable")
+		fail(w, status, message)
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		status = 502
-		fail(w, status, "upstream_redirect_rejected")
-		return
-	}
-	if newID := resp.Header.Get("Mcp-Session-Id"); newID != "" {
-		g.mu.Lock()
-		for id, se := range g.sessions {
-			if time.Now().After(se.Expires) {
-				delete(g.sessions, id)
-			}
-		}
-		sk := server + "/" + newID
-		old, exists := g.sessions[sk]
-		if exists && old.Owner != k {
-			g.mu.Unlock()
-			status = 502
-			fail(w, status, "session_collision")
-			return
-		}
-		if len(g.sessions) >= 10000 && !exists {
-			g.mu.Unlock()
-			status = 503
-			fail(w, status, "session_capacity")
-			return
-		}
-		g.sessions[sk] = session{k, time.Now().Add(24 * time.Hour)}
-		g.mu.Unlock()
+	if resp.Header.Get("X-Guanyin-Replay-Required") == "1" {
+		// HTTP 200 carries a JSON-RPC error; do not audit it as a successful tool call.
+		defer func() { status = 409 }()
 	}
 	// Discovery is bounded and filtered for JSON and SSE responses alike.
 	if msg.Method == "tools/list" && resp.StatusCode == 200 {
@@ -294,11 +243,6 @@ func (g *gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	copyHeaders(w, resp)
 	status = resp.StatusCode
 	w.WriteHeader(status)
-	if r.Method == "DELETE" && status < 300 {
-		g.mu.Lock()
-		delete(g.sessions, server+"/"+sid)
-		g.mu.Unlock()
-	}
 	// Flush incrementally without buffering full tool results.
 	buf := make([]byte, 32*1024)
 	for {
@@ -626,6 +570,12 @@ func main() {
 	}
 	defer pool.Close()
 	g := newGateway()
+	storeCtx, storeCancel := context.WithTimeout(ctx, 30*time.Second)
+	g.sessionStore, e = initSessionStore(storeCtx, pool)
+	storeCancel()
+	if e != nil {
+		log.Fatal("MCP session store initialization failed: ", e)
+	}
 	go g.sync(ctx, pool)
 	auditCtx, auditCancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

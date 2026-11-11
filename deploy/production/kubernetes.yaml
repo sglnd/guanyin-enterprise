@@ -166,7 +166,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: control-plane
-          image: guanyin/control-plane:0.7.2-enterprise.6-amd64
+          image: guanyin/control-plane:0.7.2-enterprise.7-amd64
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -182,13 +182,11 @@ spec:
             - name: API_BUILDER_MCP_URL
               value: http://guanyin-control-plane.guanyin-enterprise-system.svc.cluster.local:8080/internal/mcp/api-builder
             - name: DSH_IMAGE
-              value: bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.7-amd64
+              value: bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.8-amd64
             - name: DSH_IMAGE_PULL_POLICY
               value: IfNotPresent
             - name: DSH_VERSION
-              value: 0.2.1-rc.3-gy.ent.7
-            - name: DSH_ADDITIONAL_VERSIONS
-              value: '[{"id":"0.1.5-rc.2-gy.ent.8-sync1","label":"0.1.5-rc2","image":"bankops/guanyin-enterprise-dsh:gy.ent.8-sync1-amd64","enabled":true}]'
+              value: 0.2.1-rc.3-gy.ent.8
             # Enable proxy only after validating NetworkPolicy enforcement and required destinations.
             - name: DSH_EGRESS_MODE
               value: disabled

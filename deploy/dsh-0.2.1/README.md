@@ -17,15 +17,9 @@ DSH 固定 `0.2.1-rc.3`，GenUI `0.14.0`、Context `0.75.1`。归档、工作区
 
 `Dockerfile.overlay` 用于在已构建的同版 0.2.1 runtime 上迭代企业插件，必须显式指定 `RUNTIME_IMAGE`。它不用于把 0.1.5 镜像直接变成 0.2.1；完整依赖安装和运行时替换由主 Dockerfile 完成。
 
-## 控制平面双版本配置
+## 控制平面配置
 
-保留现有 `DSH_VERSION`、`DSH_IMAGE`，增加环境变量，例如：
-
-```json
-DSH_ADDITIONAL_VERSIONS=[{"id":"0.2.1-rc.3-gy.ent.7","label":"0.2.1 · 观因企业版","image":"bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.7-arm64","enabled":true}]
-```
-
-上述配置需在镜像构建验证并导入集群使用的 registry 后启用。生产推荐使用 image digest。创建接口按目录校验版本；启动和恢复优先使用空间数据库中已保存的 image，目录后续调整不会将已有 0.1.5 空间切到新镜像。
+使用部署清单中的 `DSH_VERSION` 和 `DSH_IMAGE` 创建 0.2.1 空间。部署前将对应架构的镜像导入节点或发布到集群可访问的镜像仓库。已有空间启动时优先使用数据库中保存的镜像。
 
 ## 企业集成接口
 

@@ -23,7 +23,9 @@ func fixture(t *testing.T) (*gateway, *atomic.Int32) {
 		_ = json.NewDecoder(r.Body).Decode(&m)
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Mcp-Session-Id", "upstream-session")
-		if m.Method == "tools/list" {
+		if m.Method == "initialize" {
+			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}}`)
+		} else if m.Method == "tools/list" {
 			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"read"},{"name":"delete"}]}}`)
 		} else {
 			io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
@@ -60,14 +62,19 @@ func TestAuthorizationAndDiscovery(t *testing.T) {
 	if h.Load() != 0 {
 		t.Fatal("denied call reached upstream")
 	}
-	w := request(g, "a", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, "")
+	init := request(g, "a", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`, "")
+	sid := init.Header().Get("Mcp-Session-Id")
+	if !strings.HasPrefix(sid, "gy1_") {
+		t.Fatal("not a gateway session", init.Code, init.Body.String())
+	}
+	w := request(g, "a", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, sid)
 	if w.Code != 200 || strings.Contains(w.Body.String(), "delete") || !strings.Contains(w.Body.String(), "read") {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if w = request(g, "b", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, "upstream-session"); w.Code != 404 {
+	if w = request(g, "b", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`, sid); w.Code != 404 {
 		t.Fatal("cross-space session allowed")
 	}
-	if w = request(g, "a", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read"}}`, "upstream-session"); w.Code != 200 {
+	if w = request(g, "a", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read"}}`, sid); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }

@@ -7,18 +7,26 @@
 ## 运行
 
 ```sh
-docker build -f mcp-gateway/Dockerfile -t guanyin/mcp-gateway:0.1.2 .
+docker build -f mcp-gateway/Dockerfile -t guanyin/mcp-gateway:0.1.6 .
 # 先升级控制面，让 initialize 建表；再部署网关。
 kubectl apply -f deploy/mcp-gateway.yaml
 ```
 
-控制面 MCP_GATEWAY_URL 默认指向企业命名空间内的网关 Service :8080，其他命名空间部署必须显式覆盖。默认单副本/Recreate：内存会话重启丢失，客户端必须重新初始化。不能直接调多副本；全局额度、会话路由尚未实现。
+控制面 MCP_GATEWAY_URL 默认指向企业命名空间内的网关 Service :8080，其他命名空间部署必须显式覆盖。部署使用单副本和 Recreate 策略。网关启动时自动创建 PostgreSQL 表 `mcp_gateway_sessions` 和索引，数据库账号需有建表权限。会话持久化后，网关重启可按需重建上游连接。全局限流仍按单副本运行。
 
 网关用 PostgreSQL LISTEN/NOTIFY 刷新整份只读一致性快照，5 秒定期核对，刷新超时 5 秒。通知非持久，定时刷新补偿；快照超过 30 秒拒绝新请求，/readyz 返回 503。配置保存不代表网关已确认生效，V1 界面尚不提供逐副本确认；正常变更通常通知后生效，数据库故障时以 30 秒快照期限作为拒绝上界。已转发的调用不回滚。
 
 每次鉴权/授权只访问内存。数据库连接池只用于刷新和异步审计。审计队列 4096，100 条或每秒提交；写入失败、队列满会记录服务日志并丢失事件，V1 为尽力审计。调用记录页面显示最近 200 条；部署方需配置归档/清理 mcp_gateway_calls，避免无限增长。
 
-协议范围：沿用 DSH Streamable HTTP 的 initialize、notifications/initialized、notifications/cancelled、ping、tools/list、tools/call，以及带所属会话的 GET/DELETE。支持 JSON/SSE 工具发现过滤和工具结果流式转发。SSE 工具发现收到与请求 ID 匹配的响应后立即返回，不等待上游关闭长连接。对 server/discover 返回 HTTP 400 + JSON-RPC -32601，支持新版双协议客户端自动回退到旧版握手；不宣称支持完整 2026-07-28 协议。拒绝批量 RPC、resources/prompts 等未实现方法；不是所有 MCP 功能的透明代理。不支持 stdio 启动。单请求 1MiB、工具列表 4MiB、调用总超时 120 秒、上游响应头超时 30 秒；不自动重试，不跟随下游重定向。会话按空间和服务隔离，有效期 24 小时、全局上限 10000。
+协议范围：沿用 DSH Streamable HTTP 的 initialize、notifications/initialized、notifications/cancelled、ping、tools/list、tools/call，以及带所属会话的 GET/DELETE。支持 JSON/SSE 工具发现过滤和工具结果流式转发。SSE 工具发现收到与请求 ID 匹配的响应后立即返回，不等待上游关闭长连接。对 server/discover 返回 HTTP 400 + JSON-RPC -32601，支持新版双协议客户端自动回退到旧版握手；不宣称支持完整 2026-07-28 协议。拒绝批量 RPC、resources/prompts 等未实现方法；不是所有 MCP 功能的透明代理。不支持 stdio 启动。单请求 1MiB、工具列表 4MiB、调用总超时 120 秒、上游响应头超时 30 秒；不跟随下游重定向。会话按空间和服务隔离，有效期一年，全局上限 10000 条，持久化初始化元数据总量约 64 MiB。
+
+## 会话恢复（0.1.6）
+
+同步自社区版提交 `0b381c5326cab1dae92e4fdfc39812b1da63926b`。网关为客户端分配稳定的会话 ID，按需重新握手恢复独立的上游 MCP 会话。升级前的旧会话 ID 可作为当前空间和服务内的别名建立新连接。
+
+上游会话失效时，工具列表、ping 和 GET 最多自动重试一次。实际工具调用若已发送到上游，恢复会话后返回 JSON-RPC 错误并将该次调用审计为 409。再次执行写操作前应先核实上一次是否生效。
+
+升级现有环境时，可仅更新网关镜像。回滚到旧网关后，重新同步受影响空间的 MCP 配置以建立旧版会话。
 
 ## 强制网络出口
 

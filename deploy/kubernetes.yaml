@@ -208,8 +208,6 @@ spec:
               value: bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.7-arm64
             - name: DSH_VERSION
               value: 0.2.1-rc.3-gy.ent.7
-            - name: DSH_ADDITIONAL_VERSIONS
-              value: '[{"id":"0.1.5-rc.2-gy.ent.8-sync1","label":"0.1.5-rc2","image":"bankops/guanyin-enterprise-dsh:gy.ent.8-sync1-arm64","enabled":true}]'
             # Enable proxy only after validating NetworkPolicy enforcement and required destinations.
             - name: DSH_EGRESS_MODE
               value: disabled

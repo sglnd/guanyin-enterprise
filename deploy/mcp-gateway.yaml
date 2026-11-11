@@ -30,7 +30,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: gateway
-          image: guanyin/mcp-gateway:0.1.2
+          image: guanyin/mcp-gateway:0.1.6
           ports:
             - { name: mcp, containerPort: 8080 }
             - { name: proxy, containerPort: 8081 }

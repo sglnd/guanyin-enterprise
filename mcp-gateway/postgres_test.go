@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,4 +79,63 @@ func TestPostgresSnapshotNotificationAndAudit(t *testing.T) {
 		t.Fatal("audit", n, e)
 	}
 	_, _ = pool.Exec(ctx, `DELETE FROM mcp_gateway_calls WHERE instance_id=$1`, space)
+}
+
+func TestPostgresDurableGatewaySessions(t *testing.T) {
+	dsn := os.Getenv("MCP_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("isolated PostgreSQL not configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	store, err := initSessionStore(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, upstream, _ := sessionFixture(t)
+	g.sessionStore = store
+	sid := startSession(t, g)
+	defer store.Delete(context.Background(), key("space-a", "crm")+"/"+sid)
+	state := g.state.Load()
+
+	// Use a new gateway and a new database pool, with no in-memory session state.
+	newPool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer newPool.Close()
+	restarted := newGateway()
+	restarted.sessionStore, err = initSessionStore(ctx, newPool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.state.Store(state)
+	if w := request(restarted, "b", listRPC, sid); w.Code != 404 {
+		t.Fatal("foreign space recovered a persisted session", w.Code)
+	}
+	w := request(restarted, "a", callRPC, sid)
+	if w.Code != 200 || w.Header().Get("Mcp-Session-Id") != sid ||
+		!strings.Contains(w.Body.String(), "ok") || upstream.initialized != 2 || upstream.executed != 1 {
+		t.Fatal("persisted session did not recover", w.Code, w.Body.String(), upstream.initialized, upstream.executed)
+	}
+
+	remove := httptest.NewRequest("DELETE", "/mcp/crm", nil)
+	remove.Header.Set("Authorization", "Bearer a")
+	remove.Header.Set("Mcp-Session-Id", sid)
+	deleted := httptest.NewRecorder()
+	restarted.ServeHTTP(deleted, remove)
+	if deleted.Code != 204 {
+		t.Fatal(deleted.Code, deleted.Body.String())
+	}
+	afterDelete := newGateway()
+	afterDelete.sessionStore = restarted.sessionStore
+	afterDelete.state.Store(state)
+	if w := request(afterDelete, "a", listRPC, sid); w.Code != 404 {
+		t.Fatal("deleted session restored", w.Code)
+	}
 }

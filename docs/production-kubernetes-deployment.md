@@ -4,9 +4,9 @@
 
 应用运行时需要四张镜像（已有 Kubernetes 集群和可用的存储、入口服务）：
 
-- `guanyin/control-plane:0.7.2-enterprise.6-amd64`
-- `bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.7-amd64`（新建空间默认）
-- `bankops/guanyin-enterprise-dsh:gy.ent.8-sync1-amd64`（0.1.5-rc2 可选）
+- `guanyin/control-plane:0.7.2-enterprise.7-amd64`
+- `bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.8-amd64`（新建空间默认）
+- `guanyin/mcp-gateway:0.1.6-ent-amd64`（MCP 网关）
 - `guanyin/postgres:17.6-alpine-amd64`
 
 `image-list.txt` 和 `platform.txt` 记录交付包的实际镜像名称、镜像 ID 与 CPU 架构。每个离线包只能部署到 `platform.txt` 所列架构的节点。先在生产集群执行：
@@ -17,10 +17,10 @@ kubectl get nodes -o custom-columns=NAME:.metadata.name,ARCH:.status.nodeInfo.ar
 
 三个节点的 `ARCH` 必须与 `platform.txt` 的架构部分一致，例如 `linux/amd64` 对应节点的 `amd64`。架构不匹配时必须换用对应架构的完整交付包，不能通过修改镜像标签混用。
 
-仓库的导出脚本支持通过 `CONTROL_PLANE_IMAGE`、`DSH_IMAGE`、`LEGACY_DSH_IMAGE` 和 `POSTGRES_IMAGE` 生成不同架构的独立交付包，并会同步改写包内 Kubernetes 清单中的镜像引用。
+仓库的导出脚本支持通过 `CONTROL_PLANE_IMAGE`、`DSH_IMAGE`、`POSTGRES_IMAGE` 和 `MCP_GATEWAY_IMAGE` 生成不同架构的独立交付包，并会同步改写包内 Kubernetes 清单中的镜像引用。
 默认不带参数执行时只生成 amd64 交付目录；只有明确设置四张 ARM64 镜像时才会导出 ARM64 包。
 
-新建空间可选择 `0.2.1-rc3`（默认）或 `0.1.5-rc2`。已有空间继续使用数据库中绑定的镜像，不会自动迁移版本；升级集群须保留已有空间引用的旧镜像。
+本包的新建空间版本为 `0.2.1-rc3`。已有空间继续使用数据库中绑定的镜像，不会自动迁移版本；升级集群须保留已有空间引用的旧镜像。
 
 本包包含模型/MCP 管理、用量上报、观因品牌、License 验证和最新审计改动。审计仅记录登录、用户本次聊天文字及删除会话，保留一年。
 
@@ -87,7 +87,7 @@ unset DB_PASSWORD ADMIN_PASSWORD DB_URL
 2. 把 `trustedHosts` 改成真实域名，例如 `guanyin.example.com`；多个域名用英文逗号分隔。
 3. 确认 DSH 镜像标签与节点架构一致。
 4. 按存储规划设置 `dshStorageClass` 和三个 DSH PVC 容量参数。配置只影响新建空间；已有 PVC 不会自动调整。
-5. 如果使用私有镜像仓库，将所有镜像引用（含 `DSH_ADDITIONAL_VERSIONS` 中的空间镜像）改成仓库地址，并配置 `imagePullSecrets`。
+5. 如果使用私有镜像仓库，将 `kubernetes.yaml` 和 `mcp-gateway.yaml` 中的镜像引用改成仓库地址，并配置 `imagePullSecrets`。
 
 执行：
 
@@ -95,7 +95,9 @@ unset DB_PASSWORD ADMIN_PASSWORD DB_URL
 kubectl apply --dry-run=server -f kubernetes.yaml
 kubectl apply -f kubernetes.yaml
 kubectl -n guanyin-enterprise-system rollout status statefulset/guanyin-postgres --timeout=5m
-kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-control-plane --timeout=5m
+kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-control-plane
+kubectl apply -f mcp-gateway.yaml
+kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-mcp-gateway --timeout=5m
 kubectl get pods,pvc -n guanyin-enterprise-system -o wide
 ```
 
@@ -126,22 +128,18 @@ kubectl auth can-i create deployments.apps \
 
 ## 7. 升级与回滚
 
-升级时先备份数据库，再在三个节点导入新镜像。将控制面更新到交付版本，并把控制面的 `DSH_IMAGE`、`DSH_VERSION`、`DSH_ADDITIONAL_VERSIONS` 更新为交付目录中的对应值。这只决定新建空间使用的镜像；已有空间不会自动迁移。执行 `kubectl apply` 时保留清单中的固定 `licensePublicKey`，否则已签发 License 会失效。
+升级时先备份数据库，再在三个节点导入新镜像。将控制面更新到交付版本，并把控制面的 `DSH_IMAGE`、`DSH_VERSION` 更新为交付目录中的对应值。如果原环境单独设置了 `DSH_ADDITIONAL_VERSIONS`，清除该设置以移除旧版本的新建入口。这只决定新建空间使用的镜像；已有空间不会自动迁移。执行 `kubectl apply` 时保留清单中的固定 `licensePublicKey`，否则已签发 License 会失效。
 
 ```bash
 kubectl -n guanyin-enterprise-system create job --from=cronjob/guanyin-postgres-backup guanyin-backup-before-upgrade
 kubectl apply -f rbac-instance-manager.yaml
 kubectl apply -f kubernetes.yaml
 kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-control-plane
+kubectl apply -f mcp-gateway.yaml
+kubectl -n guanyin-enterprise-system rollout status deployment/guanyin-mcp-gateway
 ```
 
-已有空间必须逐个切换 DSH Deployment。企业镜像会显式迁移受镜像管理的 Web profile，同时保留会话、工作区、Home 和其他 PVC 数据；不会删除 Deployment 或 PVC。升级前仍应备份。将 `<space-slug>` 替换为空间 slug：
-
-```bash
-kubectl -n guanyin-enterprise-instances set image deployment/dsh-<space-slug> \
-  dsh=bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.5-amd64
-kubectl -n guanyin-enterprise-instances rollout status deployment/dsh-<space-slug> --timeout=10m
-```
+已有 0.1.5 空间仍引用原镜像。需要继续运行这些空间时，请在对应节点保留原镜像。迁移时创建独立的 0.2.1 空间和数据卷，再转移所需的工作区文件。
 
 升级后从正式域名或 IP 完成模型、插件配置与 MCP 验收。MCP 异常时分别检查：目标网络是否可达、MCP 进程是否启动、DSH 连接器页是否需要新建或刷新会话。
 
@@ -150,14 +148,6 @@ kubectl -n guanyin-enterprise-instances rollout status deployment/dsh-<space-slu
 ```bash
 kubectl -n guanyin-enterprise-system rollout history deployment/guanyin-control-plane
 kubectl -n guanyin-enterprise-system rollout undo deployment/guanyin-control-plane
-```
-
-已有空间 DSH 回退到上一版，同样不会删除 PVC：
-
-```bash
-kubectl -n guanyin-enterprise-instances set image deployment/dsh-<space-slug> \
-  dsh=bankops/guanyin-enterprise-dsh:0.1.5-rc.2-gy.ent.4-amd64
-kubectl -n guanyin-enterprise-instances rollout status deployment/dsh-<space-slug> --timeout=10m
 ```
 
 同集群备份 PVC 不能覆盖集群级故障，必须再同步到集群外对象存储。正式上线还应完成 TLS、NetworkPolicy、监控告警、容量测试和恢复演练。
