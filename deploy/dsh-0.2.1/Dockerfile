@@ -10,9 +10,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked rm -rf /opt/dsh-seed
     && sed -i "s|https://mirrors.aliyun.com|${DEBIAN_MIRROR}|g; s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=30 update && apt-get install -y --no-install-recommends \
     ca-certificates chromium fonts-noto-cjk fonts-liberation git openssh-client \
-    python3 python3-venv python3-pip make g++ pkg-config libsecret-1-0 \
+    python3 python3-venv python3-pip antiword make g++ pkg-config libsecret-1-0 \
     && python3 -m venv /opt/dsh-docs-venv \
     && /opt/dsh-docs-venv/bin/pip install --no-cache-dir pypdf==5.9.0 python-docx==1.2.0 openpyxl==3.1.5 \
+    xlrd==2.0.2 python-calamine==0.6.1 python-pptx==1.0.2 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/dsh-runtime
 COPY deploy/dsh-0.2.1/runtime/package*.json ./
@@ -67,7 +68,7 @@ ENV NODE_ENV=production DSH_HOME=/data/dsh HOME=/home/node \
     PATH=/opt/dsh-runtime/node_modules/.bin:/opt/dsh-docs-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 LABEL org.opencontainers.image.title="Guanyin Enterprise DSH 0.2.1 workspace" \
-    org.opencontainers.image.version="0.2.1-rc.3-gy.ent.7" \
+    org.opencontainers.image.version="0.2.1-rc.3-gy.ent.9" \
     io.deepseek-harness.version="0.2.1-rc.3" io.guanyin.edition="enterprise" \
     io.guanyin.identity-contract="1" io.guanyin.models-contract="1" \
     io.guanyin.usage-contract="1" io.guanyin.browser="playwright-mcp"

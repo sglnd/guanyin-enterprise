@@ -6,7 +6,7 @@
 
 ```sh
 docker build --platform linux/arm64 -f deploy/dsh-0.2.1/Dockerfile \
-  -t bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.7-arm64 .
+  -t bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.9-arm64 .
 ```
 
 依赖锁在 `runtime/package-lock.json`；基础 Node 镜像和 Debian 源可通过 `NODE_IMAGE`、`DEBIAN_MIRROR` 构建参数指定。ARM 本地可使用现有 Debian/Node 24 镜像作为引导基础，构建会移除旧 DSH 代码并在末阶段重新封装文件系统，避免携带旧空间镜像层；不同架构的基础镜像必须匹配。
@@ -16,6 +16,12 @@ DSH 固定 `0.2.1-rc.3`，GenUI `0.14.0`、Context `0.75.1`。归档、工作区
 新版工作区通过原生初始化接口在服务就绪后建立，默认目录固定 `/workspace`，避免插件加载阶段等待工作区服务造成冷启动阻塞。无 Key 模型另外适配新版 pi-ai 的认证检查：仅对观因受管且明确无凭证的模型省略认证头；已有真实 Key 的模型保持原有认证。
 
 `Dockerfile.overlay` 用于在已构建的同版 0.2.1 runtime 上迭代企业插件，必须显式指定 `RUNTIME_IMAGE`。它不用于把 0.1.5 镜像直接变成 0.2.1；完整依赖安装和运行时替换由主 Dockerfile 完成。
+
+## 文档解析与灵枢记忆
+
+`gy.ent.9` 同步社区提交 `122901e`。完整镜像新增 `antiword`（旧版 DOC）、`xlrd`（XLS）、`python-calamine`（XLS、XLSX、XLSM、XLSB、ODS）和 `python-pptx`（PPTX）。这些工具供空间内命令和脚本使用，网页预览继续使用 DSH 的转换链路。
+
+企业 Web profile 预装灵枢 `@furongjun1999/dsh-memory@0.9.23`。兼容的企业 0.2.1 空间切换到新镜像后会合并插件配置。记忆数据存于 `/data/dsh/.dsh-memory`，身份与凭据默认存于 `/home/node/.mdcg`，随该空间的持久卷保存。从新版回退到旧镜像时使用升级前的空间卷备份。
 
 ## 控制平面配置
 
