@@ -8,7 +8,7 @@ const { Pool } = pg
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: Number(process.env.DB_POOL_SIZE || 10) })
 
 const userColumns = `u.id, u.username, u.display_name AS "displayName", u.role, u.mcp_admin AS "mcpAdmin", u.api_admin AS "apiAdmin",
-  u.tenant_id AS "tenantId", u.password_hash AS "passwordHash", u.enabled,
+  u.tenant_id AS "tenantId", u.password_hash AS "passwordHash", u.must_change_password AS "mustChangePassword", u.enabled,
   u.created_at AS "createdAt", t.name AS "tenantName"`
 const instanceColumns = `i.id, i.name, i.slug, i.version, i.image,
   i.tenant_id AS "tenantId", i.user_id AS "userId", i.status, i.error,
@@ -55,6 +55,19 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
     );
     ALTER TABLE tenants ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password boolean NOT NULL DEFAULT false;
+    CREATE TABLE IF NOT EXISTS platform_migrations (
+      id text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()
+    );
+    -- A durable marker makes this retroactive requirement run exactly once,
+    -- including when multiple control-plane replicas start concurrently.
+    WITH applied AS (
+      INSERT INTO platform_migrations(id) VALUES('require-existing-users-password-change-v1')
+      ON CONFLICT DO NOTHING RETURNING id
+    )
+    UPDATE users SET must_change_password=true
+    WHERE username<>'admin' AND deleted_at IS NULL AND EXISTS(SELECT 1 FROM applied);
+
     ALTER TABLE users ADD COLUMN IF NOT EXISTS mcp_admin boolean NOT NULL DEFAULT false;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS api_admin boolean NOT NULL DEFAULT false;
     CREATE TABLE IF NOT EXISTS instances (
@@ -242,8 +255,12 @@ export async function userBySession(token) {
   return result.rows[0]
 }
 
-export async function createSession(token, userId, expiresAt) {
-  await pool.query('INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,$3)', [sessionHash(token), userId, new Date(expiresAt)])
+export async function createSession(token, userId, expiresAt, expectedHash = null) {
+  const result = await pool.query(`WITH account AS (
+    SELECT id FROM users WHERE id=$2 AND enabled=true AND deleted_at IS NULL
+      AND ($4::text IS NULL OR password_hash=$4) FOR SHARE
+  ) INSERT INTO sessions(token_hash,user_id,expires_at) SELECT $1,id,$3 FROM account`, [sessionHash(token),userId,new Date(expiresAt),expectedHash])
+  return result.rowCount === 1
 }
 
 export async function deleteSession(token) {
@@ -351,7 +368,7 @@ async function inLiveTenant(tenantId, operation) {
 
 export async function createUser(user) {
   return inLiveTenant(user.tenantId, async client => {
-    await client.query(`INSERT INTO users(id,username,display_name,role,tenant_id,password_hash,enabled,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [user.id,user.username,user.displayName,user.role,user.tenantId,user.passwordHash,user.enabled,user.createdAt])
+    await client.query(`INSERT INTO users(id,username,display_name,role,tenant_id,password_hash,enabled,created_at,must_change_password) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [user.id,user.username,user.displayName,user.role,user.tenantId,user.passwordHash,user.enabled,user.createdAt,user.username !== 'admin'])
     return (await client.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1`, [user.id])).rows[0]
   })
 }
@@ -372,7 +389,7 @@ export async function resetUserPassword(id, passwordHash) {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    const result = await client.query('UPDATE users SET password_hash=$2 WHERE id=$1 AND deleted_at IS NULL RETURNING id', [id, passwordHash])
+    const result = await client.query(`UPDATE users SET password_hash=$2,must_change_password=(username<>'admin') WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [id, passwordHash])
     if (!result.rowCount) { await client.query('ROLLBACK'); return false }
     await client.query('DELETE FROM sessions WHERE user_id=$1', [id])
     await client.query('COMMIT')
@@ -953,4 +970,18 @@ export async function finishMcpSyncJob(result) {
 }
 export async function mcpSyncJob(id) {
   return (await pool.query('SELECT result FROM mcp_sync_jobs WHERE id=$1', [id])).rows[0]?.result
+}
+
+// Compare the previously authenticated hash to prevent overwriting a concurrent reset.
+export async function completePasswordChange(id, previousHash, passwordHash) {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await client.query(`UPDATE users SET password_hash=$3,must_change_password=false
+      WHERE id=$1 AND password_hash=$2 AND enabled=true AND deleted_at IS NULL RETURNING id`, [id,previousHash,passwordHash])
+    if (!result.rowCount) { await client.query('ROLLBACK'); return false }
+    await client.query('DELETE FROM sessions WHERE user_id=$1', [id])
+    await client.query('COMMIT')
+    return true
+  } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
 }

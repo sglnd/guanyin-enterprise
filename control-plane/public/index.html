@@ -9,6 +9,20 @@
   <link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/app-overrides.css"><link rel="stylesheet" href="/app-audit.css"><link rel="stylesheet" href="/app-usage.css"><link rel="stylesheet" href="/lifecycle.css">
 </head>
 <body>
+  <main id="change-password" class="login-shell hidden">
+    <section class="login-card">
+      <h1>请修改登录密码</h1><p>请设置个人密码，修改成功后需重新登录。</p>
+      <form id="change-password-form">
+        <label>当前密码<input name="currentPassword" type="password" autocomplete="current-password" required></label>
+        <label>新密码<input name="newPassword" type="password" autocomplete="new-password" minlength="8" required></label>
+        <small>至少 8 位，包含大写字母、小写字母、数字、特殊字符中的至少三类，且不能与当前密码相同。</small>
+        <label>确认新密码<input name="confirmPassword" type="password" autocomplete="new-password" minlength="8" required></label>
+        <p id="change-password-error" role="alert"></p>
+        <button type="submit" class="primary">修改密码并退出</button>
+        <button type="button" id="change-password-logout" class="secondary">退出登录</button>
+      </form>
+    </section>
+  </main>
   <main id="login" class="login-shell hidden">
     <section class="brand-panel">
       <div class="brand"><span class="brand-mark"><img src="/guanyin-logo.png" alt="观因"></span><span><strong>观因</strong><small>GUANYIN</small></span></div>

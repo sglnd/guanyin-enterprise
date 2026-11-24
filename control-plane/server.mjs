@@ -1,3 +1,4 @@
+import { strongPassword, passwordRule, requiresPasswordChange } from './public/app-password-policy.js'
 import {dnsAddresses,managedEgressPolicy,managedProxyEnvironment,withManagedEgress,createEgressReconciler,assertNoExtraEgress} from './egress-policy.mjs'
 import { networkRulesInput } from './network-policy.mjs'
 import { discoverMcpTools } from './mcp-discovery.mjs'
@@ -127,7 +128,7 @@ function mcpInput(input, updating = false) {
   return { allowedTools: [...new Set(allowedTools)], maxConcurrency, requestsPerMinute, name, serverName, description, transport: 'streamable-http', url, headers, enabled: input.enabled === true || input.enabled === 'true' }
 }
 
-function publicUser(user) { return { id: user.id, username: user.username, displayName: user.displayName, role: user.role, mcpAdmin: user.mcpAdmin, apiAdmin: user.apiAdmin, tenantId: user.tenantId, tenantName: user.tenantName, enabled: user.enabled } }
+function publicUser(user) { return { id: user.id, mustChangePassword: requiresPasswordChange(user), username: user.username, displayName: user.displayName, role: user.role, mcpAdmin: user.mcpAdmin, apiAdmin: user.apiAdmin, tenantId: user.tenantId, tenantName: user.tenantName, enabled: user.enabled } }
 
 function clientIp(req) {
   return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim().slice(0, 64)
@@ -739,7 +740,7 @@ async function api(req, res, path) {
     const user = await store.userByUsername(String(input.username || '').trim())
     if (!user || !user.enabled || !verifyPassword(String(input.password || ''), user.passwordHash)) return sendJson(res, 401, { error: '用户名或密码错误' })
     const token = randomBytes(32).toString('base64url')
-    await store.createSession(token, user.id, Date.now() + SESSION_TTL)
+    if (!await store.createSession(token, user.id, Date.now() + SESSION_TTL, user.passwordHash)) return sendJson(res, 401, { error: '账号或密码已变更，请重新登录' })
     await audit({ actorUserId: user.id, action: 'user_login', targetUserId: user.id, details: { ip: clientIp(req) } })
     return sendJson(res, 200, { user: publicUser(user) }, { 'set-cookie': `${ENTERPRISE_SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL / 1000}` })
   }
@@ -751,6 +752,17 @@ async function api(req, res, path) {
     return sendJson(res, 200, { ok: true }, { 'set-cookie': `${ENTERPRISE_SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0` })
   }
   if (path === '/api/me') return sendJson(res, 200, { user: publicUser(user), version: DSH_VERSION })
+  if (path === '/api/change-password' && req.method === 'POST') {
+    const input = await bodyJson(req)
+    if (!verifyPassword(String(input.currentPassword || ''), user.passwordHash)) return sendJson(res, 400, { error: '当前密码不正确' })
+    if (!strongPassword(input.newPassword)) return sendJson(res, 400, { error: passwordRule })
+    if (input.newPassword !== input.confirmPassword) return sendJson(res, 400, { error: '两次输入的新密码不一致' })
+    if (verifyPassword(input.newPassword, user.passwordHash)) return sendJson(res, 400, { error: '新密码不能与当前密码相同' })
+    if (!await store.completePasswordChange(user.id, user.passwordHash, hashPassword(input.newPassword))) return sendJson(res, 409, { error: '账号或密码已变更，请重新登录' })
+    await audit({ actorUserId: user.id, action: 'user_password_change', targetUserId: user.id, details: { sessionsRevoked: true, ip: clientIp(req) } })
+    return sendJson(res, 200, { ok: true }, { 'set-cookie': [`${ENTERPRISE_SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`,`${ENTERPRISE_INSTANCE_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`] })
+  }
+  if (requiresPasswordChange(user)) return sendJson(res, 403, { error: '请先修改登录密码', code: 'PASSWORD_CHANGE_REQUIRED' })
   const canManageApi = user.role === 'platform_admin' || user.apiAdmin
   if (path === '/api/api-builder/generate' && req.method === 'POST') {
     if (!canManageApi) return sendJson(res, 403, { error: '需要平台管理员或接口管理员权限' })
@@ -1338,7 +1350,7 @@ async function staticFile(req, res, path) {
 
 async function selectedInstance(req) {
   const user = await currentUser(req)
-  if (!user) return undefined
+  if (!user || requiresPasswordChange(user)) return undefined
   const instanceId = cookies(req).instanceId
   if (!/^[0-9a-f-]{36}$/i.test(instanceId || '')) return undefined
   const owned = await store.instanceOwnedByUser(instanceId, user.id)
@@ -1412,7 +1424,7 @@ const server = http.createServer(async (req, res) => {
     // DSH owns /api as its RPC carrier.  The control plane owns only its
     // explicit sub-routes; everything else is allowed through to the selected
     // image so image-baked settings/plugins/skills/MCP remain functional.
-    const controlApi = path === '/api/login' || path === '/api/logout' || path === '/api/me' || path === '/api/instances'
+    const controlApi = path === '/api/change-password' || path === '/api/login' || path === '/api/logout' || path === '/api/me' || path === '/api/instances'
       || /^\/api\/instances\/[^/]+\/(launch|start|stop)$/.test(path)
       || /^\/api\/instances\/[^/]+\/mcp-bindings(?:\/[^/]+)?$/.test(path)
       || /^\/api\/instances\/[^/]+\/api-credentials(?:\/[^/]+(?:\/grants)?)?$/.test(path)
@@ -1425,6 +1437,7 @@ const server = http.createServer(async (req, res) => {
     if (!user) return path === '/api' || path.startsWith('/api/')
       ? sendJson(res, 401, { error: '登录已失效，请重新登录观因企业版', code: 'AUTH_REQUIRED' })
       : redirect(res, '/login')
+    if (requiresPasswordChange(user)) return path.startsWith('/api') ? sendJson(res, 403, { error: '请先修改密码', code: 'PASSWORD_CHANGE_REQUIRED' }) : redirect(res, '/console')
     if (path === '/' && !cookies(req).instanceId) return redirect(res, '/console')
     const instance = await selectedInstance(req)
     if (!instance) return path === '/api' || path.startsWith('/api/')

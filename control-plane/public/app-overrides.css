@@ -84,3 +84,7 @@
 .space-panel .subsection-head p { line-height: 1.7; }
 .member-candidate-pager button { padding: 7px 12px; font-size: 12px; line-height: 1.5; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); }
 #space-mcp-list small { overflow-wrap: anywhere; }
+
+#change-password{grid-template-columns:1fr;padding:24px}
+#change-password .login-card{max-width:480px;margin:auto}
+#change-password-error{color:#b91c1c;min-height:1.5em}
