@@ -37,6 +37,11 @@ RUN mkdir -p /opt/dsh-runtime/node_modules/dsh-visual-workflow \
     && node /opt/dsh-runtime/patch-visual-workflow-host.mjs \
     && rm /tmp/guanyin-workflow.tgz
 COPY deploy/dsh-0.2.1/enterprise-plugin /opt/dsh-runtime/node_modules/@guanyin/dsh-enterprise
+COPY deploy/dsh-0.2.1/patch-context-insights.mjs /opt/dsh-runtime/patch-context-insights.mjs
+RUN node /opt/dsh-runtime/patch-context-insights.mjs
+COPY deploy/dsh-0.2.1/memory-lite.patch.yml /opt/dsh-runtime/node_modules/@alanzhao/dsh-memory-lite/cordis.patch.yml
+COPY deploy/dsh-0.2.1/install-memory-lite.mjs /opt/dsh-runtime/install-memory-lite.mjs
+RUN node /opt/dsh-runtime/install-memory-lite.mjs
 COPY deploy/dsh-0.1.5-core/model-sync.mjs ./model-sync.mjs
 COPY deploy/dsh-0.2.1/web-proxy.mjs ./web-proxy.mjs
 COPY deploy/dsh-0.2.1/prepare-profile.mjs ./prepare-profile.mjs
@@ -68,7 +73,7 @@ ENV NODE_ENV=production DSH_HOME=/data/dsh HOME=/home/node \
     PATH=/opt/dsh-runtime/node_modules/.bin:/opt/dsh-docs-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 LABEL org.opencontainers.image.title="Guanyin Enterprise DSH 0.2.1 workspace" \
-    org.opencontainers.image.version="0.2.1-rc.3-gy.ent.9" \
+    org.opencontainers.image.version="0.2.1-rc.3-gy.ent.11" \
     io.deepseek-harness.version="0.2.1-rc.3" io.guanyin.edition="enterprise" \
     io.guanyin.identity-contract="1" io.guanyin.models-contract="1" \
     io.guanyin.usage-contract="1" io.guanyin.browser="playwright-mcp"

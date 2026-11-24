@@ -84,6 +84,20 @@
 .space-panel .subsection-head p { line-height: 1.7; }
 .member-candidate-pager button { padding: 7px 12px; font-size: 12px; line-height: 1.5; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); }
 #space-mcp-list small { overflow-wrap: anywhere; }
+#mcp-calls-dialog { width: min(940px, calc(100vw - 28px)); }
+.mcp-calls-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.mcp-calls-toolbar p { margin: 0; color: var(--muted); }
+.mcp-calls-table { overflow: auto; max-height: min(52vh, 560px); border: 1px solid var(--line); border-radius: 10px; }
+.mcp-calls-table table { width: 100%; min-width: 650px; border-collapse: separate; border-spacing: 0; text-align: left; font-size: 13px; }
+.mcp-calls-table th, .mcp-calls-table td { padding: 11px 13px; vertical-align: middle; border-bottom: 1px solid var(--line); }
+.mcp-calls-table th { position: sticky; top: 0; background: #f6f7f5; color: var(--muted); white-space: nowrap; }
+.mcp-calls-table tbody tr:last-child td { border-bottom: 0; }
+.mcp-calls-table tbody tr:hover { background: #f8f9f7; }
+.mcp-calls-table time, .mcp-calls-table td:last-child { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mcp-calls-table td:nth-child(2), .mcp-calls-table td:nth-child(3), .mcp-calls-table code { overflow-wrap: anywhere; }
+.mcp-call-code { display: inline-block; min-width: 38px; padding: 2px 8px; border-radius: 6px; text-align: center; background: #eef1ef; }
+.mcp-call-code.success { background: #e5f4ea; color: #23613b; }
+.mcp-call-code.error { background: #fae9e7; color: #942e29; }
 
 #change-password{grid-template-columns:1fr;padding:24px}
 #change-password .login-card{max-width:480px;margin:auto}

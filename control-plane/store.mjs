@@ -947,9 +947,36 @@ export async function setMcpGatewayToken(instanceId, token) {
   await pool.query(`INSERT INTO mcp_gateway_tokens(instance_id,token_hash) VALUES($1,$2)
     ON CONFLICT(instance_id) DO UPDATE SET token_hash=excluded.token_hash WHERE mcp_gateway_tokens.token_hash<>excluded.token_hash`, [instanceId,createHash('sha256').update(token).digest('hex')])
 }
-export async function listMcpGatewayCalls() {
-  return (await pool.query(`SELECT c.*,i.name AS "instanceName",m.name AS "serverName" FROM mcp_gateway_calls c
-    LEFT JOIN instances i ON i.id=c.instance_id LEFT JOIN mcp_servers m ON m.id=c.server_id ORDER BY c.created_at DESC LIMIT 200`)).rows
+const mcpCallCutoff = "now() - interval '1 month'"
+const mcpCallPageSize = 20
+
+export async function listMcpGatewayCalls(page = 1) {
+  const { rows } = await pool.query(`
+    WITH totals AS (
+      SELECT count(*) AS total FROM mcp_gateway_calls WHERE created_at >= ${mcpCallCutoff}
+    ), pagination AS (
+      SELECT total, LEAST($1::bigint, GREATEST(1, (total + $2 - 1) / $2)) AS page
+      FROM totals
+    )
+    SELECT pagination.total, pagination.page, calls.*
+    FROM pagination
+    LEFT JOIN LATERAL (
+      SELECT c.*, i.name AS "instanceName", m.name AS "serverName"
+      FROM mcp_gateway_calls c
+      LEFT JOIN instances i ON i.id=c.instance_id
+      LEFT JOIN mcp_servers m ON m.id=c.server_id
+      WHERE c.created_at >= ${mcpCallCutoff}
+      ORDER BY c.created_at DESC, c.id DESC
+      LIMIT $2 OFFSET (pagination.page - 1) * $2
+    ) calls ON true
+    ORDER BY calls.created_at DESC, calls.id DESC`, [page, mcpCallPageSize])
+  const { total, page: currentPage } = rows[0]
+  const calls = rows.filter(row => row.id !== null).map(({ total, page, ...call }) => call)
+  return { calls, total: Number(total), page: Number(currentPage), pageSize: mcpCallPageSize }
+}
+
+export async function purgeMcpGatewayCalls() {
+  await pool.query(`DELETE FROM mcp_gateway_calls WHERE created_at < ${mcpCallCutoff}`)
 }
 
 export async function spaceNetworkPolicy(instanceId) {

@@ -946,7 +946,12 @@ async function api(req, res, path) {
   }
   if (path === '/api/mcp-calls' && req.method === 'GET') {
     if (!canManageMcp) return sendJson(res, 403, { error: '需要 MCP 管理员权限' })
-    return sendJson(res, 200, { calls: await store.listMcpGatewayCalls() })
+    const value = new URL(req.url, 'http://localhost').searchParams.get('page') ?? '1'
+    const page = Number(value)
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(page) || page < 1) {
+      return sendJson(res, 400, { error: '页码无效' })
+    }
+    return sendJson(res, 200, await store.listMcpGatewayCalls(page))
   }
   if (path === '/api/mcp-servers' && req.method === 'GET') return sendJson(res, 200, { servers: await store.listMcpServers(), canManage: canManageMcp })
   if (path === '/api/mcp-servers' && req.method === 'POST') {
@@ -1490,6 +1495,7 @@ const modelSyncReconciler = createModelSyncReconciler({
 })
 const purgeExpiredLogs = () => Promise.all([
   store.purgeModelUsage().catch(() => console.error('用量保留期清理失败')),
+  store.purgeMcpGatewayCalls().catch(error=>console.error('MCP 调用记录保留期清理失败:', error.message)),
   store.purgeAuditLogs().catch(() => console.error('审计日志保留期清理失败')),
 ])
 void purgeExpiredLogs()

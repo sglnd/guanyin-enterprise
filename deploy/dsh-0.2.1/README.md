@@ -6,12 +6,12 @@
 
 ```sh
 docker build --platform linux/arm64 -f deploy/dsh-0.2.1/Dockerfile \
-  -t bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.9-arm64 .
+  -t bankops/guanyin-enterprise-dsh:0.2.1-rc.3-gy.ent.11-arm64 .
 ```
 
 依赖锁在 `runtime/package-lock.json`；基础 Node 镜像和 Debian 源可通过 `NODE_IMAGE`、`DEBIAN_MIRROR` 构建参数指定。ARM 本地可使用现有 Debian/Node 24 镜像作为引导基础，构建会移除旧 DSH 代码并在末阶段重新封装文件系统，避免携带旧空间镜像层；不同架构的基础镜像必须匹配。
 
-DSH 固定 `0.2.1-rc.3`，GenUI `0.14.0`、Context `0.75.1`。归档、工作区/会话侧栏、文件引用、文件预览/终端和定时任务使用新版原生能力。浏览器由显式加载的 Playwright MCP provider 提供，Chromium 和字体预装，不在启动时下载浏览器。
+DSH 固定 `0.2.1-rc.3`，GenUI `0.16.0`、Context `0.75.1`。归档、工作区/会话侧栏、文件引用、文件预览/终端和定时任务使用新版原生能力。浏览器由显式加载的 Playwright MCP provider 提供，Chromium 和字体预装，不在启动时下载浏览器。
 
 新版工作区通过原生初始化接口在服务就绪后建立，默认目录固定 `/workspace`，避免插件加载阶段等待工作区服务造成冷启动阻塞。无 Key 模型另外适配新版 pi-ai 的认证检查：仅对观因受管且明确无凭证的模型省略认证头；已有真实 Key 的模型保持原有认证。
 
@@ -21,7 +21,9 @@ DSH 固定 `0.2.1-rc.3`，GenUI `0.14.0`、Context `0.75.1`。归档、工作区
 
 `gy.ent.9` 同步社区提交 `122901e`。完整镜像新增 `antiword`（旧版 DOC）、`xlrd`（XLS）、`python-calamine`（XLS、XLSX、XLSM、XLSB、ODS）和 `python-pptx`（PPTX）。这些工具供空间内命令和脚本使用，网页预览继续使用 DSH 的转换链路。
 
-企业 Web profile 预装灵枢 `@furongjun1999/dsh-memory@0.9.23`。兼容的企业 0.2.1 空间切换到新镜像后会合并插件配置。记忆数据存于 `/data/dsh/.dsh-memory`，身份与凭据默认存于 `/home/node/.mdcg`，随该空间的持久卷保存。从新版回退到旧镜像时使用升级前的空间卷备份。
+历史版本 gy.ent.9 的企业 Web profile 预装灵枢 `@furongjun1999/dsh-memory@0.9.23`。兼容的企业 0.2.1 空间切换到新镜像后会合并插件配置。记忆数据存于 `/data/dsh/.dsh-memory`，身份与凭据默认存于 `/home/node/.mdcg`，随该空间的持久卷保存。从新版回退到旧镜像时使用升级前的空间卷备份。
+
+历史版本 `gy.ent.10` 同步社区提交 `7a79c06` 的「记忆」页面，支持查看最近记忆、搜索、手动添加、修改和删除。关闭自动记忆后，当前空间暂停记录后续对话和发送归档提醒，仍可管理和召回已有记忆。
 
 ## 控制平面配置
 
@@ -120,3 +122,13 @@ See `docs/dsh-rc3-adaptation.md` for the patch inventory and plugin evaluation. 
 - 内容条件写成 `risk=high` 这类「字段=值」，上游节点输出对应 JSON 对象。条件不满足时拒绝调度该节点。
 
 试点沿用空间进程的信任边界。子代理用量归属、MCP 网关实际调用、跨空间隔离和 AI 编辑的回归验证完成后，再考虑默认启用。
+
+## 2026-11-19 社区功能同步
+
+企业运行时 gy.ent.11 同步社区提交 2eb97c5，使用 GenUI 0.16.0 和 memory-lite 0.5.1。完整构建通过主 Dockerfile 安装依赖；overlay 需要已有 memory-lite 0.5.1 的企业运行时。
+
+记忆存于空间 PVC 的 /data/dsh/.agent-memory，同空间会话共享。累计 50 条消息或空闲 30 分钟提炼，单次最多读取 20 条消息，目录预算 800 tokens，提炼输出最多 4096 tokens。原灵枢数据保留在原路径，不自动导入新插件。
+
+受管企业 profile v1/v2 首次启动迁移到 v3，迁移前备份 profile，若清理旧灵枢 patch 行也备份原 patch。回退需先停止空间，恢复升级前配置、版本标记和镜像绑定。左侧全局上下文洞察继续隐藏，会话内上下文保留。
+
+控制面新增模型模板采用 contextWindow 200000 和 off 到 high 的映射，已有模型配置保留。用量页面简化未知及估算展示。MCP 调用记录每页 20 条，保留最近一个月，启动及定时清理会删除超期记录。

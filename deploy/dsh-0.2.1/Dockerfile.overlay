@@ -4,6 +4,7 @@ ARG RUNTIME_IMAGE
 FROM ${RUNTIME_IMAGE}
 USER root
 RUN node -e 'if(require("/opt/dsh-runtime/node_modules/@deepseek-ai/dsh/package.json").version!=="0.2.1-rc.3")throw new Error("overlay requires rc3 runtime; use full Dockerfile for runtime upgrades")'
+RUN node -e 'if(require("/opt/dsh-runtime/node_modules/@alanzhao/dsh-memory-lite/package.json").version!=="0.5.1")throw Error("Use full Dockerfile for memory runtime upgrade")'
 ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 TERM=xterm-256color
 COPY deploy/dsh-0.2.1/vendor/dsh-mermaid-web-0.1.0.tar.gz /tmp/guanyin-mermaid.tgz
 COPY deploy/dsh-0.2.1/patch-mermaid.mjs /opt/dsh-runtime/patch-mermaid.mjs
@@ -22,6 +23,11 @@ RUN mkdir -p /opt/dsh-runtime/node_modules/dsh-visual-workflow \
     && node /opt/dsh-runtime/patch-visual-workflow-host.mjs \
     && rm /tmp/guanyin-workflow.tgz
 COPY deploy/dsh-0.2.1/enterprise-plugin /opt/dsh-runtime/node_modules/@guanyin/dsh-enterprise
+COPY deploy/dsh-0.2.1/patch-context-insights.mjs /opt/dsh-runtime/patch-context-insights.mjs
+RUN node /opt/dsh-runtime/patch-context-insights.mjs
+COPY deploy/dsh-0.2.1/memory-lite.patch.yml /opt/dsh-runtime/node_modules/@alanzhao/dsh-memory-lite/cordis.patch.yml
+COPY deploy/dsh-0.2.1/install-memory-lite.mjs /opt/dsh-runtime/install-memory-lite.mjs
+RUN node /opt/dsh-runtime/install-memory-lite.mjs
 COPY deploy/dsh-0.2.1/web-proxy.mjs /opt/dsh-runtime/web-proxy.mjs
 COPY deploy/dsh-0.2.1/profile-compat.mjs /opt/dsh-runtime/profile-compat.mjs
 COPY deploy/dsh-0.2.1/entrypoint.mjs /opt/dsh-runtime/entrypoint.mjs
@@ -33,4 +39,5 @@ COPY deploy/dsh-0.2.1/patch-workspace.mjs /opt/dsh-runtime/patch-workspace.mjs
 RUN node /opt/dsh-runtime/patch-workspace.mjs
 USER node
 
-LABEL org.opencontainers.image.version="0.2.1-rc.3-gy.ent.7"
+ARG IMAGE_VERSION=0.2.1-rc.3-gy.ent.11
+LABEL org.opencontainers.image.version="${IMAGE_VERSION}"

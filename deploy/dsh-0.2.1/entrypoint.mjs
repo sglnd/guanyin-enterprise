@@ -1,4 +1,5 @@
-import { compatibleProfileUpgrade, managedBundles } from './profile-compat.mjs'
+import yaml from 'js-yaml'
+import { compatibleProfileUpgrade, managedBundles, withoutLegacyMemory } from './profile-compat.mjs'
 import { cp, mkdir, readFile, writeFile, access, rm, rename } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
@@ -31,6 +32,20 @@ if (existing) {
     if (!Array.isArray(manifest.dsh?.profile?.bundles)) throw new Error('Invalid existing profile bundles')
     await writeFile(join(home, '.guanyin-profile-before-rc3.json'), packageText, { flag: 'wx', mode: 0o600 }).catch(e => { if (e.code !== 'EEXIST') throw e })
     manifest.dsh.profile.bundles = managedBundles(manifest.dsh.profile.bundles, managed)
+    if (managed.includes('@alanzhao/dsh-memory-lite')) {
+      // Keep a dedicated v4 snapshot even when an earlier rc3 backup exists.
+      await writeFile(join(home, '.guanyin-profile-before-memory-lite.json'), packageText, { flag: 'wx', mode: 0o600 }).catch(e => { if (e.code !== 'EEXIST') throw e })
+      const patchFile = join(home, 'profiles/web/cordis.patch.yml')
+      const patchText = await readFile(patchFile, 'utf8').catch(e => { if (e.code === 'ENOENT') return '[]\n'; throw e })
+      const rows = yaml.load(patchText) ?? []
+      if (!Array.isArray(rows)) throw new Error('Invalid existing profile patch')
+      const cleaned = withoutLegacyMemory(rows)
+      if (JSON.stringify(cleaned) !== JSON.stringify(rows)) {
+        await writeFile(join(home, '.guanyin-patch-before-memory-lite.yml'), patchText, { flag: 'wx', mode: 0o600 }).catch(e => { if (e.code !== 'EEXIST') throw e })
+        await writeFile(patchFile + '.memory-lite.tmp', yaml.dump(cleaned), { mode: 0o600 })
+        await rename(patchFile + '.memory-lite.tmp', patchFile)
+      }
+    }
     await writeFile(packageFile + '.rc3.tmp', JSON.stringify(manifest, null, 2), { mode: 0o600 })
     await rename(packageFile + '.rc3.tmp', packageFile)
     await writeFile(join(home, marker + '.previous'), actual, { mode: 0o600 })
