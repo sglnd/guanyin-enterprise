@@ -5,13 +5,16 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "check": "node --check server.mjs && node --check license.mjs && node --check dsh-adapter.mjs && node --check api-runner.mjs && node --check api-contract.mjs && node --check api-builder-mcp.mjs && node --check audit-log.mjs && node --check prompt-audit.mjs && node --check session-delete-audit.mjs && node --check usage.mjs && node --check egress-policy.mjs && node --check network-policy.mjs && node --check mcp-discovery.mjs && node --check mcp-sync.mjs && node --check model-registry.mjs && node --check ../deploy/dsh-0.1.5-core/model-sync.mjs && node --check ../deploy/dsh-0.1.5-core/web-proxy.mjs && node --check ../deploy/dsh-0.1.5-core/guanyin-ui-policy/lib/usage.js && node --check space-admin.mjs && node --check store.mjs && node --check public/app.js",
+    "check": "node --check server.mjs && node --check license.mjs && node --check dsh-adapter.mjs && node --check api-runner.mjs && node --check api-contract.mjs && node --check api-builder-mcp.mjs && node --check audit-log.mjs && node --check prompt-audit.mjs && node --check session-delete-audit.mjs && node --check usage.mjs && node --check egress-policy.mjs && node --check network-policy.mjs && node --check mcp-discovery.mjs && node --check mcp-sync.mjs && node --check model-registry.mjs && node --check ../deploy/dsh-0.1.5-core/model-sync.mjs && node --check ../deploy/dsh-0.1.5-core/web-proxy.mjs && node --check ../deploy/dsh-0.1.5-core/guanyin-ui-policy/lib/usage.js && node --check space-admin.mjs && node --check store.mjs && node --check public/app.js && node --check knowledge-vector-migrate.mjs && node --check knowledge-parse-worker.mjs && node --check knowledge-parse.mjs && node --check knowledge-worker.mjs && node --check knowledge-isolated.mjs && node --check knowledge-upload.mjs && node --check knowledge-http.mjs && node --check knowledge-processing.mjs && node --check knowledge-vector.mjs && node --check knowledge.mjs && node --check knowledge-models.mjs && node --check public/app-knowledge.js && node --check public/app-knowledge-upload.js",
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "ajv": "8.20.0",
     "pg": "8.16.3",
-    "ws": "8.21.3"
+    "ws": "8.21.3",
+    "exceljs": "4.4.0",
+    "mammoth": "1.13.0",
+    "pdfjs-dist": "6.5.438"
   },
   "engines": {
     "node": ">=22"

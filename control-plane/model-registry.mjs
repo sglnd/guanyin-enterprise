@@ -64,7 +64,10 @@ export async function testModelConnection(value, apiKey, fetcher = fetch) {
   const {config} = value, model = config.models[0].id
   const headers = {'content-type':'application/json'}
   let path, body
-  if (config.api === 'anthropic-messages') {
+  const embedding = value.testMode === 'embedding'
+  if (embedding) {
+    path='/embeddings'; body={model,input:'知识库连接测试'}; if(authenticated) headers.authorization=`Bearer ${apiKey}`
+  } else if (config.api === 'anthropic-messages') {
     path='/messages'; if (authenticated) headers['x-api-key']=apiKey; headers['anthropic-version']='2023-06-01'
     body={model,max_tokens:16,messages:[{role:'user',content:'Reply OK.'}]}
   } else {
@@ -81,7 +84,7 @@ export async function testModelConnection(value, apiKey, fetcher = fetch) {
       return {ok:false,elapsedMs:Date.now()-started,message:`${reason}（HTTP ${response.status}）；测试使用 POST ${config.baseURL+path}，model=${model}`}
     }
     const data=await response.json()
-    const valid=config.api==='anthropic-messages'?data.type==='message'&&Array.isArray(data.content):config.api==='openai-responses'?data.object==='response'&&Array.isArray(data.output):Array.isArray(data.choices)&&data.choices.some(c=>c.message&&typeof c.message==='object')
+    const valid=embedding ? Array.isArray(data.data?.[0]?.embedding)&&data.data[0].embedding.length>0&&data.data[0].embedding.every(Number.isFinite) : config.api==='anthropic-messages'?data.type==='message'&&Array.isArray(data.content):config.api==='openai-responses'?data.object==='response'&&Array.isArray(data.output):Array.isArray(data.choices)&&data.choices.some(c=>c.message&&typeof c.message==='object')
     if(!valid||data.error)return {ok:false,elapsedMs:Date.now()-started,message:'接口可访问，但未返回有效的模型响应，请检查协议和地址'}
     return {ok:true,elapsedMs:Date.now()-started,message:'连接成功，模型已返回响应'}
   } catch {

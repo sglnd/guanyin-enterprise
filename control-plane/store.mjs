@@ -1,3 +1,4 @@
+import { Knowledge } from './knowledge.mjs'
 import { queryAuditLogs, pruneAuditLogs, shouldRecordAudit } from './audit-log.mjs'
 import { initializeUsage, ingestUsage, queryUsage, pruneUsage } from './usage.mjs'
 import { createHash } from 'node:crypto'
@@ -7,7 +8,9 @@ import { spaceListOptions, userListOptions } from './space-admin.mjs'
 const { Pool } = pg
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: Number(process.env.DB_POOL_SIZE || 10) })
 
-const userColumns = `u.id, u.username, u.display_name AS "displayName", u.role, u.mcp_admin AS "mcpAdmin", u.api_admin AS "apiAdmin",
+export const knowledge = new Knowledge(pool)
+
+const userColumns = `u.id, u.username, u.display_name AS "displayName", u.role, u.mcp_admin AS "mcpAdmin", u.api_admin AS "apiAdmin", u.knowledge_admin AS "knowledgeAdmin",
   u.tenant_id AS "tenantId", u.password_hash AS "passwordHash", u.must_change_password AS "mustChangePassword", u.enabled,
   u.created_at AS "createdAt", t.name AS "tenantName"`
 const instanceColumns = `i.id, i.name, i.slug, i.version, i.image,
@@ -70,6 +73,7 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
 
     ALTER TABLE users ADD COLUMN IF NOT EXISTS mcp_admin boolean NOT NULL DEFAULT false;
     ALTER TABLE users ADD COLUMN IF NOT EXISTS api_admin boolean NOT NULL DEFAULT false;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS knowledge_admin boolean NOT NULL DEFAULT false;
     CREATE TABLE IF NOT EXISTS instances (
       id uuid PRIMARY KEY, name text NOT NULL, slug text NOT NULL UNIQUE,
       version text NOT NULL, image text NOT NULL, tenant_id uuid NOT NULL REFERENCES tenants(id),
@@ -242,6 +246,7 @@ export async function initialize({ adminUsername, adminPasswordHash }) {
     await client.query('COMMIT')
   } catch (error) { await client.query('ROLLBACK'); throw error } finally { client.release() }
   await initializeUsage(pool)
+  if(process.env.KNOWLEDGE_ENABLED==='true') await knowledge.init()
 }
 
 export async function userByUsername(username) {
@@ -377,9 +382,9 @@ export async function userById(id) {
   return (await pool.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1 AND u.deleted_at IS NULL`, [id])).rows[0]
 }
 
-export async function updateUser(id, { displayName, role, tenantId, enabled, mcpAdmin = false, apiAdmin = false }) {
+export async function updateUser(id, { displayName, role, tenantId, enabled, mcpAdmin = false, apiAdmin = false, knowledgeAdmin = false }) {
   return inLiveTenant(tenantId, async client => {
-    const result = await client.query(`UPDATE users SET display_name=$2,role=$3,tenant_id=$4,enabled=$5,mcp_admin=$6,api_admin=$7 WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [id, displayName, role, tenantId, enabled, mcpAdmin, apiAdmin])
+    const result = await client.query(`UPDATE users SET display_name=$2,role=$3,tenant_id=$4,enabled=$5,mcp_admin=$6,api_admin=$7,knowledge_admin=$8 WHERE id=$1 AND deleted_at IS NULL RETURNING id`, [id, displayName, role, tenantId, enabled, mcpAdmin, apiAdmin, knowledgeAdmin])
     if (!result.rowCount) throw new Error('用户不存在或已删除')
     return (await client.query(`SELECT ${userColumns} FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1`, [id])).rows[0]
   })
@@ -852,7 +857,7 @@ export async function deleteUser(id, confirmName) {
     const owned = await client.query(`SELECT i.name FROM instance_members im JOIN instances i ON i.id=im.instance_id
       WHERE im.user_id=$1 AND im.access_role='owner' AND i.deleted_at IS NULL`, [id])
     if (owned.rowCount) throw new Error(`用户仍是 ${owned.rowCount} 个空间的负责人，请先移交负责人或删除空间`)
-    await client.query('UPDATE users SET deleted_at=now(),enabled=false,mcp_admin=false,api_admin=false WHERE id=$1', [id])
+    await client.query('UPDATE users SET deleted_at=now(),enabled=false,mcp_admin=false,api_admin=false,knowledge_admin=false WHERE id=$1', [id])
     await client.query('DELETE FROM sessions WHERE user_id=$1', [id])
     await client.query('DELETE FROM instance_members WHERE user_id=$1', [id])
     await client.query('UPDATE api_credentials SET enabled=false WHERE created_by=$1', [id])

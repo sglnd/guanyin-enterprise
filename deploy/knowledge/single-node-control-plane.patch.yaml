@@ -1,0 +1,7 @@
+# Explicit single-control-plane profile for the current RWO knowledge PVC.
+# Schedule a maintenance window. This profile is not multi-node HA.
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null

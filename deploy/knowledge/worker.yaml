@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guanyin-knowledge-worker
+  namespace: guanyin-enterprise-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: guanyin-knowledge-worker}
+  template:
+    metadata:
+      labels: {app: guanyin-knowledge-worker}
+    spec:
+      serviceAccountName: guanyin-control-plane
+      terminationGracePeriodSeconds: 180
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: {app: guanyin-control-plane}
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: worker
+          image: guanyin/control-plane:0.7.2-enterprise.8-amd64
+          imagePullPolicy: IfNotPresent
+          command: [node, knowledge-worker.mjs]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: guanyin-database, key: url}
+            - {name: DSH_NAMESPACE, value: guanyin-enterprise-instances}
+            - {name: KNOWLEDGE_ROOT, value: /data/knowledge}
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: knowledge-files, mountPath: /data/knowledge}
+      volumes:
+        - name: knowledge-files
+          persistentVolumeClaim: {claimName: guanyin-knowledge-files}

@@ -1,3 +1,5 @@
+import { knowledgeHttp, knowledgeTools, knowledgeTool } from './knowledge-http.mjs'
+import { knowledgeModels } from './knowledge-models.mjs'
 import { strongPassword, passwordRule, requiresPasswordChange } from './public/app-password-policy.js'
 import {dnsAddresses,managedEgressPolicy,managedProxyEnvironment,withManagedEgress,createEgressReconciler,assertNoExtraEgress} from './egress-policy.mjs'
 import { networkRulesInput } from './network-policy.mjs'
@@ -21,6 +23,7 @@ import { runtimeVersions, versionForCreation, imageForSpace } from './runtime-ve
 import { auditPromptBeforeForward, PromptAuditError } from './prompt-audit.mjs'
 import { auditSessionDelete, SessionDeleteAuditError } from './session-delete-audit.mjs'
 
+const KNOWLEDGE_ENABLED = process.env.KNOWLEDGE_ENABLED === 'true'
 const PORT = Number(process.env.PORT || 8080)
 const PUBLIC_DIR = process.env.PUBLIC_DIR || '/app/public'
 const NAMESPACE = process.env.DSH_NAMESPACE || 'guanyin-enterprise-instances'
@@ -128,7 +131,7 @@ function mcpInput(input, updating = false) {
   return { allowedTools: [...new Set(allowedTools)], maxConcurrency, requestsPerMinute, name, serverName, description, transport: 'streamable-http', url, headers, enabled: input.enabled === true || input.enabled === 'true' }
 }
 
-function publicUser(user) { return { id: user.id, mustChangePassword: requiresPasswordChange(user), username: user.username, displayName: user.displayName, role: user.role, mcpAdmin: user.mcpAdmin, apiAdmin: user.apiAdmin, tenantId: user.tenantId, tenantName: user.tenantName, enabled: user.enabled } }
+function publicUser(user) { return { id: user.id, knowledgeEnabled: KNOWLEDGE_ENABLED, mustChangePassword: requiresPasswordChange(user), username: user.username, displayName: user.displayName, role: user.role, mcpAdmin: user.mcpAdmin, apiAdmin: user.apiAdmin, knowledgeAdmin: user.knowledgeAdmin, tenantId: user.tenantId, tenantName: user.tenantName, enabled: user.enabled } }
 
 function clientIp(req) {
   return String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim().slice(0, 64)
@@ -377,6 +380,7 @@ async function reconcileSpaceMcp(instance, refreshServerId) {
     headers: { 'X-Guanyin-Instance': instance.id, 'X-Guanyin-Token': token },
   } }
   desired.set(apiBuilder.id, apiBuilder)
+  if(KNOWLEDGE_ENABLED) desired.set('guanyin-mcp-knowledge',{id:'guanyin-mcp-knowledge',config:{serverName:'guanyin-knowledge',transport:'streamable-http',url:API_BUILDER_MCP_URL.replace(/api-builder$/, 'knowledge'),headers:{'X-Guanyin-Instance':instance.id,'X-Guanyin-Token':token}}})
   const managed = (current.servers || []).filter(item => item.id.startsWith('guanyin-mcp-'))
   for (const id of new Set(managed.filter(item => !desired.has(item.id)).map(item => item.id))) {
     await removeMcpEntries(instance, id)
@@ -401,7 +405,7 @@ async function syncSpaceMcpWhenReady(instance) {
   await Promise.all([applySpaceMcp(instance), applySpaceModels(instance)])
 }
 
-async function apiBuilderMcp(req, res) {
+async function apiBuilderMcp(req, res, knowledge = false) {
   if (req.method !== 'POST') return sendJson(res, 405, { error: 'method not allowed' }, { allow: 'POST' })
   const instanceId = String(req.headers['x-guanyin-instance'] || '')
   const instance = /^[0-9a-f-]{36}$/i.test(instanceId) ? await store.instanceById(instanceId) : undefined
@@ -413,13 +417,13 @@ async function apiBuilderMcp(req, res) {
     const { id, method, params = {} } = item || {}
     if (method === 'initialize') return { jsonrpc: '2.0', id, result: {
       protocolVersion: '2025-03-26', capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: 'guanyin-api-builder', version: '0.1.0' },
+      serverInfo: { name: knowledge?'guanyin-knowledge':'guanyin-api-builder', version: '0.1.0' },
     } }
     if (method === 'ping') return { jsonrpc: '2.0', id, result: {} }
-    if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: apiBuilderTools } }
+    if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: knowledge?knowledgeTools:apiBuilderTools } }
     if (method === 'tools/call') {
       try {
-        const value = await executeApiBuilderTool(params.name, params.arguments || {}, { store, instance, audit })
+        const value = knowledge ? await knowledgeTool(store.knowledge,instance.id,params.name,params.arguments||{}) : await executeApiBuilderTool(params.name, params.arguments || {}, { store, instance, audit })
         return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value } }
       } catch (error) {
         const message = error.code === '23505' ? '接口标识已存在，请换一个 slug' : error.message
@@ -751,6 +755,7 @@ async function api(req, res, path) {
     await store.deleteSession(cookies(req).sessionToken)
     return sendJson(res, 200, { ok: true }, { 'set-cookie': `${ENTERPRISE_SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0` })
   }
+  if(path.startsWith('/api/knowledge')){if(!KNOWLEDGE_ENABLED)return sendJson(res,404,{error:'知识库验证版未启用'});if(requiresPasswordChange(user))return sendJson(res,403,{error:'请先修改密码'});return knowledgeHttp(req,res,path,{k:store.knowledge,user,bodyJson,sendJson,sync:async id=>{const instance=await store.instanceById(id);if(!instance||instance.status==='stopped')return false;await syncSpaceMcpWhenReady(instance);return true}})}
   if (path === '/api/me') return sendJson(res, 200, { user: publicUser(user), version: DSH_VERSION })
   if (path === '/api/change-password' && req.method === 'POST') {
     const input = await bodyJson(req)
@@ -1094,6 +1099,12 @@ async function api(req, res, path) {
       try{const secret=await k8sRequest('GET',`/api/v1/namespaces/${NAMESPACE}/secrets/guanyin-model-${existing.id}`);apiKey=Buffer.from(secret.data?.apiKey||'','base64').toString('utf8')}catch{return sendJson(res,400,{error:'无法读取已保存密钥，请重新填写或检查 Secret 权限'})}
     }
     if(value.config.authMode!=='none'&&!apiKey)return sendJson(res,400,{error:'请填写 API Key'})
+    if (!['auto','chat','embedding'].includes(input.testMode || 'auto')) return sendJson(res,400,{error:'测试接口无效'})
+    value.testMode = input.testMode
+    if ((!input.testMode || input.testMode === 'auto') && KNOWLEDGE_ENABLED) {
+      const cfg = await store.knowledge.settings()
+      if (cfg.embeddingProvider === input.providerId && value.config.models[0].id === cfg.embeddingModel) value.testMode = 'embedding'
+    }
     return sendJson(res,200,await testModelConnection(value,apiKey))
   }
   if (path === '/api/admin/model-providers' && req.method === 'GET') return sendJson(res,200,{providers:await store.listModelProviders()})
@@ -1309,8 +1320,8 @@ async function api(req, res, path) {
     const role = input.role === 'tenant_admin' ? 'tenant_admin' : 'member'
     const displayName = String(input.displayName || '').trim()
     if (!displayName || !await store.tenantExists(input.tenantId)) return sendJson(res, 400, { error: '用户名称或租户无效' })
-    const updated = await store.updateUser(target.id, { displayName, role, tenantId: input.tenantId, enabled: input.enabled === true || input.enabled === 'true', mcpAdmin: input.mcpAdmin === true || input.mcpAdmin === 'true', apiAdmin: input.apiAdmin === true || input.apiAdmin === 'true' })
-    await audit({ actorUserId: user.id, action: 'user_update', targetUserId: target.id, details: { before: { displayName: target.displayName, role: target.role, tenantId: target.tenantId, enabled: target.enabled }, after: { displayName: updated.displayName, role: updated.role, tenantId: updated.tenantId, enabled: updated.enabled }, ip: clientIp(req) } })
+    const updated = await store.updateUser(target.id, { displayName, role, tenantId: input.tenantId, enabled: input.enabled === true || input.enabled === 'true', mcpAdmin: input.mcpAdmin === true || input.mcpAdmin === 'true', apiAdmin: input.apiAdmin === true || input.apiAdmin === 'true', knowledgeAdmin: input.knowledgeAdmin === true || input.knowledgeAdmin === 'true' })
+    await audit({ actorUserId: user.id, action: 'user_update', targetUserId: target.id, details: { before: { displayName: target.displayName, role: target.role, tenantId: target.tenantId, enabled: target.enabled, mcpAdmin: target.mcpAdmin, apiAdmin: target.apiAdmin, knowledgeAdmin: target.knowledgeAdmin }, after: { displayName: updated.displayName, role: updated.role, tenantId: updated.tenantId, enabled: updated.enabled, mcpAdmin: updated.mcpAdmin, apiAdmin: updated.apiAdmin, knowledgeAdmin: updated.knowledgeAdmin }, ip: clientIp(req) } })
     return sendJson(res, 200, { user: publicUser(updated) })
   }
   const resetPassword = path.match(/^\/api\/admin\/users\/([^/]+)\/reset-password$/)
@@ -1424,12 +1435,13 @@ const server = http.createServer(async (req, res) => {
       try { return sendJson(res, 200, { ok: true, accepted: await store.recordModelUsage(instance, (await bodyJson(req)).events) }) }
       catch (error) { return sendJson(res, 400, { error: error.message }) }
     }
+    if(path==='/internal/mcp/knowledge')return KNOWLEDGE_ENABLED ? apiBuilderMcp(req,res,true) : sendJson(res,404,{error:'Not found'})
     if (path === '/internal/mcp/api-builder') return await apiBuilderMcp(req, res)
     if (path.startsWith('/openapi/v1/')) return await openApi(req, res, path)
     // DSH owns /api as its RPC carrier.  The control plane owns only its
     // explicit sub-routes; everything else is allowed through to the selected
     // image so image-baked settings/plugins/skills/MCP remain functional.
-    const controlApi = path === '/api/change-password' || path === '/api/login' || path === '/api/logout' || path === '/api/me' || path === '/api/instances'
+    const controlApi = path.startsWith('/api/knowledge') || path === '/api/change-password' || path === '/api/login' || path === '/api/logout' || path === '/api/me' || path === '/api/instances'
       || /^\/api\/instances\/[^/]+\/(launch|start|stop)$/.test(path)
       || /^\/api\/instances\/[^/]+\/mcp-bindings(?:\/[^/]+)?$/.test(path)
       || /^\/api\/instances\/[^/]+\/api-credentials(?:\/[^/]+(?:\/grants)?)?$/.test(path)
@@ -1476,6 +1488,15 @@ server.on('upgrade', async (req, socket, head) => {
 })
 
 await store.initialize({ adminUsername: process.env.BOOTSTRAP_ADMIN_USER || 'admin', adminPasswordHash: hashPassword(process.env.BOOTSTRAP_ADMIN_PASSWORD || 'Guanyin@2026') })
+if(KNOWLEDGE_ENABLED){
+ store.knowledge.models=knowledgeModels(async id=>{
+  const p=await store.modelProviderById(id);if(!p?.enabled)return null
+  if(p.config.authMode==='none')return {...p,apiKey:undefined}
+  const secret=await k8sRequest('GET',`/api/v1/namespaces/${NAMESPACE}/secrets/guanyin-model-${p.id}`)
+  return {...p,apiKey:Buffer.from(secret.data?.apiKey||'','base64').toString('utf8')}
+ })
+ if(process.env.KNOWLEDGE_WORKER_MODE!=='external'){const knowledgeTimer=setInterval(()=>{void store.knowledge.tick().catch(()=>console.error('knowledge worker unavailable'))},3000);knowledgeTimer.unref()}
+}
 const apiRunWorker = new ApiRunWorker({ store, adapterFor: adapterForRun, ensureInstanceReady: ensureApiInstanceReady })
 apiRunWorker.start()
 server.listen(PORT, '0.0.0.0', () => console.log(`Guanyin control plane listening on ${PORT}`))

@@ -1,0 +1,34 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: guanyin-knowledge-pgvector-migrate
+  namespace: guanyin-enterprise-system
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 3600
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: guanyin-control-plane
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: migrate
+          image: guanyin/control-plane:RELEASE-amd64
+          imagePullPolicy: IfNotPresent
+          command: [node, knowledge-vector-migrate.mjs]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: guanyin-database, key: url}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}

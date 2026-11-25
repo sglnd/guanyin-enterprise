@@ -1,0 +1,14 @@
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - {name: KNOWLEDGE_ENABLED, value: "true"}
+            - {name: KNOWLEDGE_WORKER_MODE, value: external}
+            - {name: KNOWLEDGE_ROOT, value: /data/knowledge}
+          volumeMounts:
+            - {name: knowledge-files, mountPath: /data/knowledge}
+      volumes:
+        - name: knowledge-files
+          persistentVolumeClaim: {claimName: guanyin-knowledge-files}

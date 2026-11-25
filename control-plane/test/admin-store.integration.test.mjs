@@ -18,6 +18,18 @@ test('admin pagination and deletion preserve history while revoking access', { s
       await db.query("INSERT INTO instances(id,name,slug,version,image,tenant_id,status) VALUES($1,$2,$3,'test','test',$4,$5)", [id,`分页空间${index}`,`page-${id}`,tenantId,index%2 ? 'stopped' : 'running'])
       await store.setInstanceMember(id, memberId, 'owner')
     }
+    await t.test('knowledge administration persists independently of MCP and API permissions', async () => {
+      const before=await store.userById(memberId);
+      const updated=await store.updateUser(memberId,{...before,knowledgeAdmin:true,mcpAdmin:true,apiAdmin:false});
+      assert.equal(updated.knowledgeAdmin,true);assert.equal(updated.mcpAdmin,true);assert.equal(updated.apiAdmin,false);
+      const session='knowledge-role-test-'+randomUUID();
+      // This fixture is disabled; enabling it is required for an authenticated session lookup.
+      await db.query('UPDATE users SET enabled=true WHERE id=$1',[memberId]);
+      assert.equal(await store.createSession(session,memberId,new Date(Date.now()+60000)),true);
+      assert.equal((await store.userBySession(session)).knowledgeAdmin,true);
+      await store.updateUser(memberId,{...before,knowledgeAdmin:false,mcpAdmin:false,apiAdmin:false});
+      assert.equal((await store.userById(memberId)).knowledgeAdmin,false);
+    });
     await t.test('spaces paginate, clamp after filtering and search member names literally', async () => {
       const first = await store.listAdminInstances(new URLSearchParams('q=分页空间&pageSize=12'))
       const second = await store.listAdminInstances(new URLSearchParams('q=分页空间&pageSize=12&page=2'))

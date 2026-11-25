@@ -1,0 +1,17 @@
+# Local Docker Desktop fallback only. Never apply this hostPath PV to production.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: guanyin-knowledge-preview-local
+spec:
+  capacity: {storage: 10Gi}
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: standard
+  claimRef: {namespace: guanyin-enterprise-system, name: guanyin-knowledge-files}
+  hostPath: {path: /var/local/guanyin-knowledge-preview, type: Directory}
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - {key: kubernetes.io/hostname, operator: In, values: [desktop-control-plane]}

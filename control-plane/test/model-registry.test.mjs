@@ -116,7 +116,7 @@ test('editing providers retains custom upstream IDs and multi-model identities',
  const open=source.slice(source.indexOf('function openModelProvider('),source.indexOf("\n$('#model-provider-form').onsubmit"))
  for(const models of [[{id:'glm-5',name:'GLM',reasoningEfforts:false}],[{id:'a',name:'A'},{id:'b',name:'B'}]]){
    const provider={id:'test',code:'glm-route',name:'GLM',enabled:true,config:{api:'openai-completions',baseURL:'http://gateway.test/v1',models}}
-   const form={reset(){},dataset:{},elements:Object.fromEntries(['code','name','apiKey','authMode','api','baseURL','streamIdleTimeoutMs','models','requestModel','compat','tolerateMissingFinishReason','enabled'].map(k=>[k,{}])),querySelector:()=>({})}
+   const form={reset(){},dataset:{},elements:Object.fromEntries(['code','name','apiKey','authMode','api','baseURL','streamIdleTimeoutMs','models','requestModel','compat','tolerateMissingFinishReason','enabled'].map(k=>[k,{}])),querySelector:()=>({dataset:{}})}
    const nodes={'#model-provider-form':form,'#model-provider-title':{},'#model-provider-dialog':{showModal(){}}}
    runInNewContext(open+';openModelProvider("test")',{me:{role:'platform_admin'},modelProviders:[provider],$:s=>nodes[s]})
    const value=modelProviderInput({code:provider.code,name:provider.name,api:provider.config.api,baseURL:provider.config.baseURL,models:form.elements.models.value,requestModel:form.elements.requestModel.value})
@@ -185,4 +185,17 @@ test('background model sync retries after container readiness, backs off failure
  release([]);await first
  const recovered=createModelSyncReconciler({list:async()=>[{id:'persisted-pending'}],apply:async()=>{calls++;return {status:'synced'}}})
  await recovered.tick();assert.equal(calls,5)
+})
+
+test('embedding connection tests use embeddings and reject invalid vectors', async () => {
+ const {testModelConnection}=await import('../model-registry.mjs')
+ const value={config:{api:'openai-completions',authMode:'none',baseURL:'http://local/v1',models:[{id:'bge-m3'}],compat:{}},testMode:'embedding'}
+ const result=await testModelConnection(value,undefined,async(url,options)=>{
+  assert.equal(url,'http://local/v1/embeddings')
+  assert.deepEqual(JSON.parse(options.body),{model:'bge-m3',input:'知识库连接测试'})
+  assert.equal(options.headers.authorization,undefined)
+  return Response.json({data:[{embedding:[0.1,0.2]}]})
+ })
+ assert.equal(result.ok,true)
+ assert.equal((await testModelConnection(value,undefined,async()=>Response.json({data:[{embedding:[]}]}))).ok,false)
 })

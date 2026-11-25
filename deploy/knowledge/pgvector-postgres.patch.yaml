@@ -1,0 +1,7 @@
+# Example AMD64 image. Build/import for the target architecture before applying.
+spec:
+  template:
+    spec:
+      containers:
+        - name: postgres
+          image: guanyin/postgres:17.6-pgvector0.8.7-amd64

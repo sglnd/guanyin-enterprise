@@ -74,6 +74,7 @@ for (const version of ['0.1.5-rc.2', '0.2.1-rc.3']) {
       callMcpManager: async (space, method, value) => { if (method === 'list') return { servers: rows }; changes.push([method, value.id]) },
       removeMcpEntries: async (space, id) => changes.push(['remove', id]), waitForMcpEntry: async () => {},
     }
+    context.KNOWLEDGE_ENABLED = false
     runInNewContext(source.slice(source.indexOf('async function reconcileSpaceMcp('), source.indexOf('\nasync function syncSpaceMcpWhenReady(')), context)
     await context.reconcileSpaceMcp({ id: 'space', slug: 'test', version }, service.id)
     assert.deepEqual(changes, [['remove', entry.id], ['add', entry.id]])
